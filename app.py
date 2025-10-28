@@ -2094,39 +2094,40 @@ elif page == "Trucks":
     # Helper: current trailer per truck, based on trailers.truck_id
     def get_trucks_with_names_by_trailer_link():
         conn = get_db_connection()
-        df = pd.read_sql_query(
-            """
-            SELECT 
+        try:
+            sql = """
+            SELECT
                 t.truck_id,
                 t.number AS truck_number,
                 t.make,
                 t.model,
                 t.year,
-                t.plate,
                 t.vin,
+                t.plate,
                 t.status,
-                -- trailer linked by trailers.truck_id
-                tr.trailer_id,
-                tr.number AS trailer_number,
-                d.name AS driver_name,
-                disp.name AS dispatcher_name,
-                t.loan_amount,
-                t.loan_start_date,
-                t.loan_term_months,
-                t.created_at
+                t.notes,
+                d.name AS dispatcher_name,
+                tr.trailer_number AS linked_trailer_number
             FROM trucks t
-            LEFT JOIN trailers tr ON tr.truck_id = t.truck_id
-            LEFT JOIN drivers d ON t.driver_id = d.driver_id
-            LEFT JOIN dispatchers disp ON t.dispatcher_id = disp.dispatcher_id
-            ORDER BY t.number
-            """,
-            conn,
-        )
-        conn.close()
-        for col in ("trailer_number", "driver_name", "dispatcher_name"):
-            if col in df.columns:
-                df[col] = df[col].fillna("Not Assigned")
-        return df
+            LEFT JOIN truck_dispatcher_link tdl
+                   ON tdl.truck_id = t.truck_id
+                  AND (tdl.end_date IS NULL OR tdl.end_date = '')
+            LEFT JOIN dispatchers d
+                   ON d.dispatcher_id = tdl.dispatcher_id
+            LEFT JOIN trailers tr
+                   ON tr.truck_id = t.truck_id
+            ORDER BY t.truck_id DESC;
+            """
+            df = pd.read_sql_query(sql, conn)
+            return df
+        except Exception as e:
+            import traceback
+            st.error(f"Trucks query failed: {e}")
+            st.code(sql, language="sql")
+            st.text(traceback.format_exc())
+            return pd.DataFrame()
+        finally:
+            conn.close()
 
     # Helper: list of trailers for selection
     def get_all_trailers():
