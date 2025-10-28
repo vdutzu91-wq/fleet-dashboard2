@@ -13,7 +13,6 @@ import tempfile
 import traceback
 import errno
 import json
-import pdfkit
 import tempfile
 import numpy as np
 import time
