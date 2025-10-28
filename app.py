@@ -1113,6 +1113,67 @@ def ensure_trailers_table():
     finally:
         conn.close()
 
+def ensure_trucks_table():
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        # Create table if missing (with all columns your app queries)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS trucks (
+            truck_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            number TEXT,
+            make TEXT,
+            model TEXT,
+            year INTEGER,
+            vin TEXT,
+            plate TEXT,
+            status TEXT DEFAULT 'Active',
+            notes TEXT
+        );
+        """)
+
+        # Ensure any missing columns are added (idempotent)
+        cur.execute("PRAGMA table_info(trucks);")
+        cols = {row[1] for row in cur.fetchall()}
+
+        if "notes" not in cols:
+            cur.execute("ALTER TABLE trucks ADD COLUMN notes TEXT;")
+
+        if "status" not in cols:
+            cur.execute("ALTER TABLE trucks ADD COLUMN status TEXT DEFAULT 'Active';")
+
+        if "number" not in cols:
+            cur.execute("ALTER TABLE trucks ADD COLUMN number TEXT;")
+
+        if "make" not in cols:
+            cur.execute("ALTER TABLE trucks ADD COLUMN make TEXT;")
+
+        if "model" not in cols:
+            cur.execute("ALTER TABLE trucks ADD COLUMN model TEXT;")
+
+        if "year" not in cols:
+            cur.execute("ALTER TABLE trucks ADD COLUMN year INTEGER;")
+
+        if "vin" not in cols:
+            cur.execute("ALTER TABLE trucks ADD COLUMN vin TEXT;")
+
+        if "plate" not in cols:
+            cur.execute("ALTER TABLE trucks ADD COLUMN plate TEXT;")
+
+        conn.commit()
+    finally:
+        conn.close()
+
+try:
+    ensure_trucks_table()
+    ensure_dispatcher_tables()
+    ensure_trailers_table()
+except Exception as _e:
+    try:
+        st.warning(f"Ensure tables failed: {_e}")
+    except Exception:
+        pass
+
 # -------------------------
 # DB connection helper (must exist before migrations that use it)
 # -------------------------
