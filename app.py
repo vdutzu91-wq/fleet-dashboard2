@@ -28,9 +28,6 @@ ROLE_NAMES = {
 
 from math import isfinite
 from datetime import datetime, date
-pdfkit_config = pdfkit.configuration(
-    wkhtmltopdf=r"C:\Program Files\wkhtmltopdf\bin\wkhtmltopdf.exe"
-)
 from datetime import date # already present above, ok
 
 COMPANY_START = date(2019, 1, 1)
