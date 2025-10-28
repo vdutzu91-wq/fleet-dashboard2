@@ -828,6 +828,59 @@ def ensure_truck_and_trailer_extra_columns():
 # Call it after init_database()
 ensure_truck_and_trailer_extra_columns()
 
+def ensure_income_extra_columns():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    # Time fields
+    try:
+        cur.execute("ALTER TABLE income ADD COLUMN pickup_time TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cur.execute("ALTER TABLE income ADD COLUMN delivery_time TEXT")
+    except sqlite3.OperationalError:
+        pass
+
+    # Ensure all columns referenced by the Income page exist (idempotent guards)
+    for sql in [
+        "ALTER TABLE income ADD COLUMN driver_name TEXT",
+        "ALTER TABLE income ADD COLUMN broker_number TEXT",
+        "ALTER TABLE income ADD COLUMN tonu TEXT DEFAULT 'N'",
+        "ALTER TABLE income ADD COLUMN empty_miles REAL",
+        "ALTER TABLE income ADD COLUMN loaded_miles REAL",
+        "ALTER TABLE income ADD COLUMN rpm REAL",
+        "ALTER TABLE income ADD COLUMN pickup_city TEXT",
+        "ALTER TABLE income ADD COLUMN pickup_state TEXT",
+        "ALTER TABLE income ADD COLUMN pickup_zip TEXT",
+        "ALTER TABLE income ADD COLUMN pickup_address TEXT",
+        "ALTER TABLE income ADD COLUMN delivery_city TEXT",
+        "ALTER TABLE income ADD COLUMN delivery_state TEXT",
+        "ALTER TABLE income ADD COLUMN delivery_zip TEXT",
+        "ALTER TABLE income ADD COLUMN delivery_address TEXT",
+        "ALTER TABLE income ADD COLUMN stops INTEGER",
+        "ALTER TABLE income ADD COLUMN pickup_full_address TEXT",
+        "ALTER TABLE income ADD COLUMN delivery_full_address TEXT",
+        # If you renamed "Description" to "Load number", ensure that column name exists in DB
+        # (your UI might still use i.description, so we keep it)
+    ]:
+        try:
+            cur.execute(sql)
+        except sqlite3.OperationalError:
+            pass
+
+    # Helpful indexes for date-range queries
+    try:
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_income_date ON income(date)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_income_truck ON income(truck_id)")
+    except Exception:
+        pass
+
+    conn.commit()
+    conn.close()
+
+# Call this during startup, after init_database()
+ensure_income_extra_columns()
+
 # -------------------------
 # History tables: loans + assignments
 # -------------------------
