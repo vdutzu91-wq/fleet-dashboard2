@@ -6972,29 +6972,45 @@ elif page == "Reports":
             # Build category breakdown safely even if some category columns are missing
             category_data = []
             categories_present = [c for c in category_columns if c in df_base.columns]
-            for _, row in df_base.iterrows():
-                for cat in categories_present:
-                    category_data.append({'Truck': row.get('truck_number', None), 'Category': cat, 'Amount': row[cat]})
-            fig = px.bar(pd.DataFrame(category_data), x='Truck', y='Amount', color='Category',
-                         title='Expense Distribution by Category and Truck', labels={'Amount': 'Total Expenses ($)'},
-                         barmode='stack')
-            st.plotly_chart(fig, use_container_width=True)
 
-        elif viz_option == "Miles vs Expenses":
-            df_scatter = df_base.copy()
-            if df_scatter.index.name == 'truck_number' and 'truck_number' not in df_scatter.columns:
-                df_scatter = df_scatter.reset_index()
-            fig = px.scatter(
-                df_scatter,
-                x='total_miles',
-                y='total_expenses',
-                size=df_scatter['cost_per_mile_raw'].fillna(0),
-                color='truck_number',
-                title='Total Miles vs Total Expenses by Truck',
-                labels={'total_miles': 'Total Miles', 'total_expenses': 'Total Expenses ($)', 'truck_number': 'Truck'},
-                hover_data=['truck_number'] if 'truck_number' in df_scatter.columns else None
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            # If no categories present, show friendly message and skip chart
+            if not categories_present:
+                st.info("No expense categories available to chart for this date range.")
+            else:
+                for _, row in df_base.iterrows():
+                    truck_label = row.get('truck_number', None)
+                    # Normalize to string for Plotly
+                    truck_label = "Unknown" if truck_label is None or (isinstance(truck_label, float) and pd.isna(truck_label)) else str(truck_label)
+                    for cat in categories_present:
+                        amt = row.get(cat, 0.0)
+                        # Coerce to number and skip zeros/NaNs to avoid empty series
+                        try:
+                            amt = float(amt)
+                        except Exception:
+                            amt = 0.0
+                        if amt and not pd.isna(amt):
+                            category_data.append({'Truck': truck_label, 'Category': str(cat), 'Amount': amt})
+
+                df_cat_chart = pd.DataFrame(category_data)
+
+                if df_cat_chart.empty or df_cat_chart['Amount'].sum() == 0:
+                    st.info("No non-zero category expenses to display for this date range.")
+                else:
+                    # Ensure columns exist and are of correct types
+                    df_cat_chart['Truck'] = df_cat_chart['Truck'].astype(str)
+                    df_cat_chart['Category'] = df_cat_chart['Category'].astype(str)
+                    df_cat_chart['Amount'] = pd.to_numeric(df_cat_chart['Amount'], errors='coerce').fillna(0.0)
+
+                    fig = px.bar(
+                        df_cat_chart,
+                        x='Truck',
+                        y='Amount',
+                        color='Category',
+                        title='Expense Distribution by Category and Truck',
+                        labels={'Amount': 'Total Expenses ($)'},
+                        barmode='stack'
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
 
         # Exports
         st.markdown("#### Export Cost Per Mile Report")
