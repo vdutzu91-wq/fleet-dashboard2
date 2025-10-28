@@ -780,6 +780,54 @@ def init_database():
 # call initial DB creation
 init_database()
 
+def ensure_truck_and_trailer_extra_columns():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    # trucks.notes
+    try:
+        cur.execute("ALTER TABLE trucks ADD COLUMN notes TEXT")
+    except sqlite3.OperationalError:
+        pass
+    # trucks.color (optional if UI references it)
+    try:
+        cur.execute("ALTER TABLE trucks ADD COLUMN color TEXT")
+    except sqlite3.OperationalError:
+        pass
+    # trucks.owner (optional if UI references it)
+    try:
+        cur.execute("ALTER TABLE trucks ADD COLUMN owner TEXT")
+    except sqlite3.OperationalError:
+        pass
+
+    # trailers.trailer_number (your query references it)
+    try:
+        cur.execute("ALTER TABLE trailers ADD COLUMN trailer_number TEXT")
+    except sqlite3.OperationalError:
+        pass
+
+    # Also ensure dispatcher link table if your query uses it
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS truck_dispatcher_link (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            truck_id INTEGER NOT NULL,
+            dispatcher_id INTEGER NOT NULL,
+            start_date DATE NOT NULL DEFAULT (DATE('now')),
+            end_date DATE,
+            FOREIGN KEY (truck_id) REFERENCES trucks(truck_id) ON DELETE CASCADE,
+            FOREIGN KEY (dispatcher_id) REFERENCES dispatchers(dispatcher_id) ON DELETE CASCADE
+        )
+    """)
+
+    # Helpful indexes
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_tdl_truck ON truck_dispatcher_link(truck_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_tdl_dispatcher ON truck_dispatcher_link(dispatcher_id)")
+
+    conn.commit()
+    conn.close()
+
+# Call it after init_database()
+ensure_truck_and_trailer_extra_columns()
+
 # -------------------------
 # History tables: loans + assignments
 # -------------------------
