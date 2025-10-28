@@ -881,6 +881,22 @@ def ensure_income_extra_columns():
 # Call this during startup, after init_database()
 ensure_income_extra_columns()
 
+def ensure_expenses_fuel_columns():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("ALTER TABLE expenses ADD COLUMN gallons REAL")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cur.execute("ALTER TABLE expenses ADD COLUMN unit_price REAL")
+    except sqlite3.OperationalError:
+        pass
+    conn.commit()
+    conn.close()
+
+ensure_expenses_fuel_columns()
+
 # -------------------------
 # History tables: loans + assignments
 # -------------------------
@@ -2586,8 +2602,8 @@ elif page == "Expenses":
     # Top metrics (selected range + YTD)
     conn_tot = get_db_connection()
     try:
-        df_range = pd.read_sql_query("SELECT amount FROM expenses WHERE date BETWEEN ? AND ?", conn_tot, params=(start_date, end_date))
-        df_ytd = pd.read_sql_query("SELECT amount FROM expenses WHERE date BETWEEN ? AND ?", conn_tot, params=(date(date.today().year, 1, 1), date.today()))
+        df_range = pd.read_sql_query("SELECT amount FROM expenses WHERE DATE(date) BETWEEN DATE(?) AND DATE(?)", conn_tot, params=(start_date, end_date))
+        df_ytd = pd.read_sql_query("SELECT amount FROM expenses WHERE DATE(date) BETWEEN DATE(?) AND DATE(?)", conn_tot, params=(date(date.today().year, 1, 1), date.today()))
     finally:
         conn_tot.close()
     total_range = df_range['amount'].sum() if not df_range.empty else 0.0
@@ -2856,7 +2872,7 @@ elif page == "Expenses":
         st.markdown(f"### {current_tab}")
 
         # Build query
-        query = "SELECT * FROM expenses WHERE date BETWEEN ? AND ?"
+        query = "SELECT * FROM expenses WHERE DATE(date) BETWEEN DATE(?) AND DATE(?)"
         params = [start_date, end_date]
         if filter_cat:
             query += " AND category = ?"
@@ -6183,7 +6199,7 @@ elif page == "Reports":
             date(date, 'weekday 0', '-6 days') as week_start,
             SUM(amount) as total_income
         FROM income
-        WHERE date BETWEEN ? AND ?
+        WHERE DATE(date) BETWEEN DATE(?) AND DATE(?)
         GROUP BY week
         ORDER BY week
     """, conn_charts, params=(chart_start_date, chart_end_date))
@@ -6195,7 +6211,7 @@ elif page == "Reports":
             date(date, 'weekday 0', '-6 days') as week_start,
             SUM(amount) as total_expense
         FROM expenses
-        WHERE date BETWEEN ? AND ?
+        WHERE DATE(date) BETWEEN DATE(?) AND DATE(?)
         GROUP BY week
         ORDER BY week
     """, conn_charts, params=(chart_start_date, chart_end_date))
@@ -6223,7 +6239,7 @@ elif page == "Reports":
             SUM(amount) as total_income,
             SUM(COALESCE(loaded_miles, 0) + COALESCE(empty_miles, 0)) as total_miles
         FROM income
-        WHERE date BETWEEN ? AND ?
+        WHERE DATE(date) BETWEEN DATE(?) AND DATE(?)
         GROUP BY week
         ORDER BY week
     """, conn_charts, params=(chart_start_date, chart_end_date))
@@ -6234,18 +6250,25 @@ elif page == "Reports":
         axis=1
     )
 
-    # Get weekly fuel data (total and by truck)
+    # Get weekly fuel data (total and by truck) – robust to missing columns/values
     df_fuel_weekly = pd.read_sql_query("""
         SELECT
-            strftime('%Y-%W', e.date) as week,
-            date(e.date, 'weekday 0', '-6 days') as week_start,
+            strftime('%Y-%W', e.date) AS week,
+            DATE(e.date, 'weekday 0', '-6 days') AS week_start,
             e.truck_id,
-            CAST(e.truck_id AS TEXT) as truck_number,
-            SUM(CASE WHEN e.category = 'Fuel' THEN e.gallons ELSE 0 END) as total_gallons
+            t.number AS truck_number,
+            SUM(
+                CASE
+                    WHEN LOWER(COALESCE(e.category, '')) LIKE '%fuel%'
+                    THEN COALESCE(e.gallons, CAST(json_extract(e.metadata, '$.gallons') AS REAL))
+                    ELSE 0
+                END
+            ) AS total_gallons
         FROM expenses e
+        LEFT JOIN trucks t ON t.truck_id = e.truck_id
         WHERE e.date BETWEEN ? AND ?
-        GROUP BY week, e.truck_id
-        ORDER BY week, e.truck_id
+        GROUP BY week, week_start, e.truck_id, t.number
+        ORDER BY week_start, e.truck_id
     """, conn_charts, params=(chart_start_date, chart_end_date))
 
     # Get weekly miles by truck
@@ -6256,7 +6279,7 @@ elif page == "Reports":
             truck_id,
             SUM(COALESCE(loaded_miles, 0) + COALESCE(empty_miles, 0)) as total_miles
         FROM income
-        WHERE date BETWEEN ? AND ?
+        WHERE DATE(date) BETWEEN DATE(?) AND DATE(?)
         GROUP BY week, truck_id
         ORDER BY week, truck_id
     """, conn_charts, params=(chart_start_date, chart_end_date))
