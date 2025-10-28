@@ -1053,6 +1053,66 @@ def init_database():
 # call initial DB creation
 init_database()
 
+def ensure_dispatcher_tables():
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        # Dispatchers (people)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS dispatchers (
+                dispatcher_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                phone TEXT,
+                email TEXT,
+                status TEXT DEFAULT 'Active',
+                notes TEXT
+            );
+        """)
+        # Link of truck to dispatcher, date-bounded
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS truck_dispatcher_link (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                truck_id INTEGER NOT NULL,
+                dispatcher_id INTEGER NOT NULL,
+                start_date TEXT NOT NULL,
+                end_date TEXT,
+                notes TEXT,
+                FOREIGN KEY (truck_id) REFERENCES trucks(truck_id),
+                FOREIGN KEY (dispatcher_id) REFERENCES dispatchers(dispatcher_id)
+            );
+        """)
+        # Helpful indexes
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_tdl_truck_id ON truck_dispatcher_link(truck_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_tdl_dispatcher_id ON truck_dispatcher_link(dispatcher_id);")
+        conn.commit()
+    finally:
+        conn.close()
+
+def ensure_trailers_table():
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS trailers (
+                trailer_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trailer_number TEXT,
+                make TEXT,
+                model TEXT,
+                year INTEGER,
+                vin TEXT,
+                plate TEXT,
+                status TEXT DEFAULT 'Active',
+                truck_id INTEGER,
+                notes TEXT,
+                FOREIGN KEY (truck_id) REFERENCES trucks(truck_id)
+            );
+        """)
+        # Optional indexes
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_trailers_truck_id ON trailers(truck_id);")
+        conn.commit()
+    finally:
+        conn.close()
+
 # -------------------------
 # DB connection helper (must exist before migrations that use it)
 # -------------------------
@@ -1282,6 +1342,16 @@ def migrate_trailer_history_add_truck_id(conn):
     conn.commit()
 
 init_history_tables()
+
+# Ensure required tables exist on boot (safe to call repeatedly)
+try:
+    ensure_dispatcher_tables()
+    ensure_trailers_table()
+except Exception as _e:
+    try:
+        st.warning(f"Table ensure failed: {_e}")
+    except Exception:
+        pass
 
 # Run one-time migration: add truck_id to trailer history and backfill
 try:
