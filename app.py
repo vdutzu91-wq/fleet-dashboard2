@@ -220,53 +220,46 @@ def get_user_pages():
     return st.session_state.user.get("allowed_pages", [])
 
 def init_users_db():
-    """Initialize users and authentication tables"""
     conn = get_db_connection()
-    cur = conn.cursor()
-    # Users table with page permissions
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            full_name TEXT,
-            email TEXT,
-            role TEXT NOT NULL DEFAULT 'viewer',
-            allowed_pages TEXT,
-            is_active INTEGER DEFAULT 1,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_login TIMESTAMP
-        )
-    """)
-    # Session logs table (for audit trail)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS session_logs (
-            log_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            username TEXT,
-            action TEXT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            ip_address TEXT,
-            FOREIGN KEY (user_id) REFERENCES users(user_id)
-        )
-    """)
-    # Check if allowed_pages column exists, if not add it
-    cur.execute("PRAGMA table_info(users)")
-    columns = [col[1] for col in cur.fetchall()]
-    if 'allowed_pages' not in columns:
-        cur.execute("ALTER TABLE users ADD COLUMN allowed_pages TEXT")
-    # Create default admin user if no users exist
-    cur.execute("SELECT COUNT(*) FROM users")
-    if cur.fetchone()[0] == 0:
-        default_password = "admin123"
-        password_hash = hashlib.sha256(default_password.encode()).hexdigest()
-        all_pages = json.dumps(ALL_PAGES)
-        cur.execute("""
-            INSERT INTO users (username, password_hash, full_name, role, allowed_pages, is_active)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, ("admin", password_hash, "System Administrator", "admin", all_pages, 1))
-        conn.commit()
-    conn.close()
+    try:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id SERIAL PRIMARY KEY,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                full_name TEXT,
+                email TEXT,
+                role TEXT NOT NULL DEFAULT 'viewer',
+                allowed_pages TEXT,
+                is_active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_login TIMESTAMP
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS session_logs (
+                log_id SERIAL PRIMARY KEY,
+                user_id INTEGER,
+                username TEXT,
+                action TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                ip_address TEXT
+            )
+        """))
+        # Ensure allowed_pages column (handled above, provided for idempotency)
+        # Seed admin only if no users
+        cnt = conn.execute(text("SELECT COUNT(*) FROM users")).scalar()
+        if cnt == 0:
+            import hashlib, json
+            default_password = "admin123"
+            password_hash = hashlib.sha256(default_password.encode()).hexdigest()
+            all_pages = json.dumps(ALL_PAGES)
+            conn.execute(text("""
+                INSERT INTO users (username, password_hash, full_name, role, allowed_pages, is_active)
+                VALUES (:u, :ph, :fn, :role, :ap, 1)
+            """), {"u": "admin", "ph": password_hash, "fn": "System Administrator", "role": "admin", "ap": all_pages})
+    finally:
+        conn.close()
 
 # Call this in your main initialization
 init_users_db()
@@ -585,31 +578,25 @@ def remove_attachment_from_expense(expense_id, attachment_index):
 # Expense categories and metadata
 # -------------------------
 def ensure_expense_categories_table():
-    conn = None
+    conn = get_db_connection()
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
+        conn.execute(text("""
             CREATE TABLE IF NOT EXISTS expense_categories (
-                category_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category_id SERIAL PRIMARY KEY,
                 name TEXT UNIQUE NOT NULL,
                 schema_json TEXT NOT NULL,
                 default_apply_mode TEXT NOT NULL
             )
-        """)
+        """))
         # ensure expenses table has metadata and apply_mode columns
-        try:
-            cur.execute("ALTER TABLE expenses ADD COLUMN metadata TEXT")
-        except sqlite3.OperationalError:
-            pass
-        try:
-            cur.execute("ALTER TABLE expenses ADD COLUMN apply_mode TEXT")
-        except sqlite3.OperationalError:
-            pass
-        conn.commit()
+        for alter in ("ALTER TABLE expenses ADD COLUMN metadata TEXT",
+                      "ALTER TABLE expenses ADD COLUMN apply_mode TEXT"):
+            try:
+                conn.execute(text(alter))
+            except SQLAlchemyError:
+                pass
     finally:
-        if conn:
-            conn.close()
+        conn.close()
 
 def get_expense_categories():
     ensure_expense_categories_table()
@@ -695,110 +682,117 @@ def ensure_expenses_attachments():
 # Core DB creation & migration
 # -------------------------
 def init_database():
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    # trucks
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS trucks (
-        truck_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        number TEXT UNIQUE,
-        make TEXT,
-        model TEXT,
-        year INTEGER,
-        plate TEXT,
-        vin TEXT,
-        status TEXT DEFAULT 'Active',
-        trailer_id INTEGER,
-        driver_id INTEGER,
-        loan_amount REAL DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-    # trailers
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS trailers (
-        trailer_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        number TEXT UNIQUE,
-        type TEXT,
-        year INTEGER,
-        plate TEXT,
-        vin TEXT,
-        status TEXT DEFAULT 'Active',
-        loan_amount REAL DEFAULT 0,
-        truck_id INTEGER,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-    # drivers
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS drivers (
-        driver_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        license_number TEXT,
-        phone TEXT,
-        email TEXT,
-        hire_date DATE,
-        status TEXT DEFAULT 'Active',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-    # expenses
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS expenses (
-        expense_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        date DATE NOT NULL,
-        category TEXT NOT NULL,
-        amount REAL NOT NULL,
-        truck_id INTEGER,
-        description TEXT,
-        location TEXT,
-        service_type TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (truck_id) REFERENCES trucks (truck_id)
-    )
-    ''')
-    # income
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS income (
-        income_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        date DATE NOT NULL,
-        source TEXT NOT NULL,
-        amount REAL NOT NULL,
-        truck_id INTEGER,
-        description TEXT,
-        pickup_date DATE,
-        pickup_address TEXT,
-        delivery_date DATE,
-        delivery_address TEXT,
-        job_reference TEXT,
-        empty_miles REAL,
-        loaded_miles REAL,
-        rpm REAL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (truck_id) REFERENCES trucks (truck_id)
-    )
-    ''')
-    # extra income columns (idempotent)
-    for alter_sql in [
-        "ALTER TABLE income ADD COLUMN driver_name TEXT",
-        "ALTER TABLE income ADD COLUMN broker_number TEXT",
-        "ALTER TABLE income ADD COLUMN tonu TEXT DEFAULT 'N'",
-        "ALTER TABLE income ADD COLUMN pickup_city TEXT",
-        "ALTER TABLE income ADD COLUMN pickup_state TEXT",
-        "ALTER TABLE income ADD COLUMN pickup_zip TEXT",
-        "ALTER TABLE income ADD COLUMN delivery_city TEXT",
-        "ALTER TABLE income ADD COLUMN delivery_state TEXT",
-        "ALTER TABLE income ADD COLUMN delivery_zip TEXT",
-        "ALTER TABLE income ADD COLUMN stops INTEGER",
-        "ALTER TABLE income ADD COLUMN pickup_full_address TEXT",
-        "ALTER TABLE income ADD COLUMN delivery_full_address TEXT",
-    ]:
-        try:
-            cur.execute(alter_sql)
-        except sqlite3.OperationalError:
-            pass
-    conn.commit()
-    conn.close()
+    conn = get_db_connection()
+    try:
+        # trucks
+        conn.execute(text('''
+        CREATE TABLE IF NOT EXISTS trucks (
+            truck_id SERIAL PRIMARY KEY,
+            number TEXT UNIQUE,
+            make TEXT,
+            model TEXT,
+            year INTEGER,
+            plate TEXT,
+            vin TEXT,
+            status TEXT DEFAULT 'Active',
+            trailer_id INTEGER,
+            driver_id INTEGER,
+            loan_amount REAL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        '''))
+        # trailers
+        conn.execute(text('''
+        CREATE TABLE IF NOT EXISTS trailers (
+            trailer_id SERIAL PRIMARY KEY,
+            number TEXT UNIQUE,
+            type TEXT,
+            year INTEGER,
+            plate TEXT,
+            vin TEXT,
+            status TEXT DEFAULT 'Active',
+            loan_amount REAL DEFAULT 0,
+            truck_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        '''))
+        # drivers
+        conn.execute(text('''
+        CREATE TABLE IF NOT EXISTS drivers (
+            driver_id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            license_number TEXT,
+            phone TEXT,
+            email TEXT,
+            hire_date DATE,
+            status TEXT DEFAULT 'Active',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        '''))
+        # expenses
+        conn.execute(text('''
+        CREATE TABLE IF NOT EXISTS expenses (
+            expense_id SERIAL PRIMARY KEY,
+            date DATE NOT NULL,
+            category TEXT NOT NULL,
+            amount REAL NOT NULL,
+            truck_id INTEGER,
+            description TEXT,
+            location TEXT,
+            service_type TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        '''))
+        # income
+        conn.execute(text('''
+        CREATE TABLE IF NOT EXISTS income (
+            income_id SERIAL PRIMARY KEY,
+            date DATE NOT NULL,
+            source TEXT NOT NULL,
+            amount REAL NOT NULL,
+            truck_id INTEGER,
+            description TEXT,
+            pickup_date DATE,
+            pickup_address TEXT,
+            delivery_date DATE,
+            delivery_address TEXT,
+            job_reference TEXT,
+            empty_miles REAL,
+            loaded_miles REAL,
+            rpm REAL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        '''))
+        # extra income columns (idempotent)
+        for alter_sql in [
+            "ALTER TABLE income ADD COLUMN driver_name TEXT",
+            "ALTER TABLE income ADD COLUMN broker_number TEXT",
+            "ALTER TABLE income ADD COLUMN tonu TEXT DEFAULT 'N'",
+            "ALTER TABLE income ADD COLUMN pickup_city TEXT",
+            "ALTER TABLE income ADD COLUMN pickup_state TEXT",
+            "ALTER TABLE income ADD COLUMN pickup_zip TEXT",
+            "ALTER TABLE income ADD COLUMN delivery_city TEXT",
+            "ALTER TABLE income ADD COLUMN delivery_state TEXT",
+            "ALTER TABLE income ADD COLUMN delivery_zip TEXT",
+            "ALTER TABLE income ADD COLUMN stops INTEGER",
+            "ALTER TABLE income ADD COLUMN pickup_full_address TEXT",
+            "ALTER TABLE income ADD COLUMN delivery_full_address TEXT"
+        ]:
+            try:
+                conn.execute(text(alter_sql))
+            except SQLAlchemyError:
+                pass
+    finally:
+        conn.close()
+
+    try:
+        with get_db_connection() as c:
+            v = c.execute(text("SELECT version()")).scalar()
+        st.success("Connected to Postgres")
+        st.caption(v)
+    except Exception as e:
+        st.error(f"Database connection failed: {e}")
+        st.stop()
 
 # call initial DB creation
 init_database()
@@ -834,7 +828,7 @@ def ensure_truck_and_trailer_extra_columns():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             truck_id INTEGER NOT NULL,
             dispatcher_id INTEGER NOT NULL,
-            start_date DATE NOT NULL DEFAULT (DATE('now')),
+            start_date DATE NOT NULL DEFAULT (CURRENT_DATE),
             end_date DATE,
             FOREIGN KEY (truck_id) REFERENCES trucks(truck_id) ON DELETE CASCADE,
             FOREIGN KEY (dispatcher_id) REFERENCES dispatchers(dispatcher_id) ON DELETE CASCADE
@@ -925,45 +919,46 @@ ensure_expenses_fuel_columns()
 # -------------------------
 def init_history_tables():
     conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS loans_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        entity_type TEXT NOT NULL,
-        entity_id INTEGER NOT NULL,
-        monthly_amount REAL NOT NULL,
-        start_date DATE NOT NULL,
-        end_date DATE,
-        note TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS trailer_truck_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        trailer_id INTEGER NOT NULL,
-        old_truck_id INTEGER,
-        new_truck_id INTEGER,
-        start_date DATE NOT NULL,
-        end_date DATE,
-        note TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS driver_assignment_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        driver_id INTEGER NOT NULL,
-        truck_id INTEGER,
-        trailer_id INTEGER,
-        start_date DATE NOT NULL,
-        end_date DATE,
-        note TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(text('''
+        CREATE TABLE IF NOT EXISTS loans_history (
+            id SERIAL PRIMARY KEY,
+            entity_type TEXT NOT NULL,
+            entity_id INTEGER NOT NULL,
+            monthly_amount REAL NOT NULL,
+            start_date DATE NOT NULL,
+            end_date DATE,
+            note TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        '''))
+        conn.execute(text('''
+        CREATE TABLE IF NOT EXISTS trailer_truck_history (
+            id SERIAL PRIMARY KEY,
+            trailer_id INTEGER NOT NULL,
+            old_truck_id INTEGER,
+            new_truck_id INTEGER,
+            start_date DATE NOT NULL,
+            end_date DATE,
+            note TEXT,
+            truck_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        '''))
+        conn.execute(text('''
+        CREATE TABLE IF NOT EXISTS driver_assignment_history (
+            id SERIAL PRIMARY KEY,
+            driver_id INTEGER NOT NULL,
+            truck_id INTEGER,
+            trailer_id INTEGER,
+            start_date DATE NOT NULL,
+            end_date DATE,
+            note TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        '''))
+    finally:
+        conn.close()
 
 def migrate_trailer_history_add_truck_id(conn):
     """
@@ -980,7 +975,7 @@ def migrate_trailer_history_add_truck_id(conn):
             SELECT trl.truck_id FROM trailers trl WHERE trl.trailer_id = h.trailer_id
         )
         WHERE h.truck_id IS NULL
-          AND (h.end_date IS NULL OR h.end_date = '' OR DATE(h.end_date) > DATE('now'))
+          AND (h.end_date IS NULL OR h.end_date = '' OR DATE(h.end_date) > CURRENT_DATE)
           AND EXISTS (SELECT 1 FROM trailers trl WHERE trl.trailer_id = h.trailer_id AND trl.truck_id IS NOT NULL);
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_tth_trailer_id ON trailer_truck_history(trailer_id)")
@@ -1011,34 +1006,32 @@ ensure_expenses_attachments()
 # -------------------------
 def ensure_dispatcher_tables():
     conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS dispatchers (
-            dispatcher_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
-            phone TEXT,
-            email TEXT,
-            notes TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS dispatcher_trucks (
-            dispatcher_id INTEGER NOT NULL,
-            truck_id INTEGER NOT NULL,
-            PRIMARY KEY (dispatcher_id, truck_id),
-            FOREIGN KEY (dispatcher_id) REFERENCES dispatchers(dispatcher_id) ON DELETE CASCADE,
-            FOREIGN KEY (truck_id) REFERENCES trucks(truck_id) ON DELETE CASCADE
-        )
-    """)
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS dispatchers (
+                dispatcher_id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                phone TEXT,
+                email TEXT,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS dispatcher_trucks (
+                dispatcher_id INTEGER NOT NULL,
+                truck_id INTEGER NOT NULL,
+                PRIMARY KEY (dispatcher_id, truck_id)
+            )
+        """))
+    finally:
+        conn.close()
 
 def ensure_truck_dispatcher_link():
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        cur.execute("ALTER TABLE trucks ADD COLUMN dispatcher_id INTEGER")
+        conn.execute(text("ALTER TABLE trucks ADD COLUMN dispatcher_id INTEGER")
     except sqlite3.OperationalError:
         pass
     conn.commit()
@@ -1050,7 +1043,7 @@ ensure_truck_dispatcher_link()
 def add_dispatcher(name, phone=None, email=None, notes=None):
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("INSERT OR IGNORE INTO dispatchers (name, phone, email, notes) VALUES (?, ?, ?, ?)",
+    conn.execute(text("INSERT OR IGNORE INTO dispatchers (name, phone, email, notes) VALUES (?, ?, ?, ?)",
                 (name.strip(), phone, email, notes))
     conn.commit()
     dispatcher_id = cur.lastrowid
@@ -1060,7 +1053,7 @@ def add_dispatcher(name, phone=None, email=None, notes=None):
 def update_dispatcher(dispatcher_id, name, phone=None, email=None, notes=None):
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("UPDATE dispatchers SET name=?, phone=?, email=?, notes=? WHERE dispatcher_id=?",
+    conn.execute(text("UPDATE dispatchers SET name=?, phone=?, email=?, notes=? WHERE dispatcher_id=?",
                 (name.strip(), phone, email, notes, dispatcher_id))
     conn.commit()
     conn.close()
@@ -1068,15 +1061,15 @@ def update_dispatcher(dispatcher_id, name, phone=None, email=None, notes=None):
 def delete_dispatcher(dispatcher_id):
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("DELETE FROM dispatcher_trucks WHERE dispatcher_id=?", (dispatcher_id,))
-    cur.execute("DELETE FROM dispatchers WHERE dispatcher_id=?", (dispatcher_id,))
+    conn.execute(text("DELETE FROM dispatcher_trucks WHERE dispatcher_id=?", (dispatcher_id,))
+    conn.execute(text("DELETE FROM dispatchers WHERE dispatcher_id=?", (dispatcher_id,))
     conn.commit()
     conn.close()
 
 def get_all_dispatchers():
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("SELECT dispatcher_id, name, phone, email, notes, created_at FROM dispatchers ORDER BY name")
+    conn.execute(text("SELECT dispatcher_id, name, phone, email, notes, created_at FROM dispatchers ORDER BY name")
     rows = cur.fetchall()
     conn.close()
     return [{"dispatcher_id": r[0], "name": r[1], "phone": r[2], "email": r[3], "notes": r[4], "created_at": r[5]} for r in rows]
@@ -1084,7 +1077,7 @@ def get_all_dispatchers():
 def get_trucks_for_dispatcher(dispatcher_id):
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("SELECT truck_id FROM dispatcher_trucks WHERE dispatcher_id = ?", (dispatcher_id,))
+    conn.execute(text("SELECT truck_id FROM dispatcher_trucks WHERE dispatcher_id = ?", (dispatcher_id,))
     rows = cur.fetchall()
     conn.close()
     return [r[0] for r in rows]
@@ -1092,7 +1085,7 @@ def get_trucks_for_dispatcher(dispatcher_id):
 def assign_trucks_to_dispatcher(dispatcher_id, truck_id_list):
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("DELETE FROM dispatcher_trucks WHERE dispatcher_id = ?", (dispatcher_id,))
+    conn.execute(text("DELETE FROM dispatcher_trucks WHERE dispatcher_id = ?", (dispatcher_id,))
     for tid in set([int(t) for t in truck_id_list if t is not None]):
         cur.execute("INSERT OR IGNORE INTO dispatcher_trucks (dispatcher_id, truck_id) VALUES (?, ?)", (dispatcher_id, tid))
     conn.commit()
@@ -1120,8 +1113,8 @@ def safe_delete_all_rows(table_name: str):
     conn = get_db_connection()
     try:
         cur = conn.cursor()
-        cur.execute("PRAGMA foreign_keys = OFF;")
-        cur.execute(f"DELETE FROM {table_name};")
+        conn.execute(text("PRAGMA foreign_keys = OFF;")
+        conn.execute(text(f"DELETE FROM {table_name};")
         conn.commit()
     except Exception:
         conn.rollback()
@@ -1141,17 +1134,17 @@ def safe_delete_one(table_name: str, key_col: str, key_val):
     try:
         cur = conn.cursor()
         try:
-            cur.execute(f"DELETE FROM {table_name} WHERE {key_col} = ?;", (key_val,))
+            conn.execute(text(f"DELETE FROM {table_name} WHERE {key_col} = ?;", (key_val,))
         except Exception:
-            cur.execute("PRAGMA foreign_keys = OFF;")
-            cur.execute(f"DELETE FROM {table_name} WHERE {key_col} = ?;", (key_val,))
+            conn.execute(text("PRAGMA foreign_keys = OFF;")
+            conn.execute(text(f"DELETE FROM {table_name} WHERE {key_col} = ?;", (key_val,))
         conn.commit()
     except Exception:
         conn.rollback()
         raise
     finally:
         try:
-            cur.execute("PRAGMA foreign_keys = ON;")
+            conn.execute(text("PRAGMA foreign_keys = ON;")
         except Exception:
             pass
         conn.close()
