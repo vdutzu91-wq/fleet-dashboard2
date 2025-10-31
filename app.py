@@ -52,10 +52,12 @@ ALL_PAGES = [
 # Persistent DB path (works locally and on Streamlit Cloud)
 # -------------------------
 # On Streamlit Cloud, set DB_DIR="/mount/data" in App → Settings → Secrets.
-# Locally, if not set, it defaults to current folder "."
 DB_DIR = st.secrets.get("DB_DIR", ".")
-os.makedirs(DB_DIR, exist_ok=True)
-DB_FILE = os.path.join(DB_DIR, "fleet_management.db")
+# Avoid trying to create the managed folder on Streamlit Cloud
+if DB_DIR not in ("/mount/data", "/app/data"):
+    os.makedirs(os.path.expanduser(DB_DIR), exist_ok=True)
+
+DB_FILE = os.path.join(os.path.expanduser(DB_DIR), "fleet_management.db")
 
 # -------------------------
 # DB connection helper
