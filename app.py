@@ -18,6 +18,7 @@ import time
 import mimetypes
 import requests
 from math import isfinite
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 # -------------------------
