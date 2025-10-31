@@ -51,13 +51,23 @@ ALL_PAGES = [
 # -------------------------
 # Persistent DB path (works locally and on Streamlit Cloud)
 # -------------------------
-DB_DIR = st.secrets.get("DB_DIR", "data")  # default to a local "data" folder
+import tempfile
+
+DB_DIR = st.secrets.get("DB_DIR", None)
+if not DB_DIR:
+    # fall back to a guaranteed-writable temp dir
+    DB_DIR = tempfile.gettempdir()
+
 resolved_dir = os.path.abspath(os.path.expanduser(DB_DIR))
 
 def _ensure_dir_exists_and_writable(path: str) -> str:
-    # Create the folder if missing
+    # Only try to create if parent is writable; otherwise, assume temp dir is writable.
     if not os.path.isdir(path):
-        os.makedirs(path, exist_ok=True)
+        try:
+            os.makedirs(path, exist_ok=True)
+        except Exception:
+            # If creation fails, force fallback to temp dir
+            path = tempfile.gettempdir()
     # Probe writability
     probe = os.path.join(path, ".write_probe")
     with open(probe, "w") as f:
