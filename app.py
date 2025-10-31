@@ -49,35 +49,32 @@ ALL_PAGES = [
 ]
 
 # -------------------------
-# Persistent DB path (works locally and on Streamlit Cloud)
+# Postgres connection (Neon via SQLAlchemy)
 # -------------------------
-import tempfile
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 
-DB_DIR = st.secrets.get("DB_DIR", None)
-if not DB_DIR:
-    # fall back to a guaranteed-writable temp dir
-    DB_DIR = tempfile.gettempdir()
+def get_pg_conn_url():
+    host = st.secrets["PGHOST"]
+    db = st.secrets["PGDATABASE"]
+    user = st.secrets["PGUSER"]
+    pwd = st.secrets["PGPASSWORD"]
+    port = st.secrets.get("PGPORT", "5432")
+    sslmode = st.secrets.get("PGSSLMODE", "require")
+    return f"postgresql+psycopg2://{user}:{pwd}@{host}:{port}/{db}?sslmode={sslmode}"
 
-resolved_dir = os.path.abspath(os.path.expanduser(DB_DIR))
+_engine: Engine | None = None
 
-def _ensure_dir_exists_and_writable(path: str) -> str:
-    # Only try to create if parent is writable; otherwise, assume temp dir is writable.
-    if not os.path.isdir(path):
-        try:
-            os.makedirs(path, exist_ok=True)
-        except Exception:
-            # If creation fails, force fallback to temp dir
-            path = tempfile.gettempdir()
-    # Probe writability
-    probe = os.path.join(path, ".write_probe")
-    with open(probe, "w") as f:
-        f.write("ok")
-    os.remove(probe)
-    return path
+def get_db_engine() -> Engine:
+    global _engine
+    if _engine is None:
+        _engine = create_engine(get_pg_conn_url(), pool_pre_ping=True)
+    return _engine
 
-resolved_dir = _ensure_dir_exists_and_writable(resolved_dir)
-DB_FILE = os.path.join(resolved_dir, "fleet_management.db")
-st.caption(f"DB file: {DB_FILE}")
+def get_db_connection():
+    # Returns a SQLAlchemy connection compatible with pandas read_sql functions
+    return get_db_engine().connect()
 
 # -------------------------
 # DB connection helper
