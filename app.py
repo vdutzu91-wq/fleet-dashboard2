@@ -51,23 +51,55 @@ ALL_PAGES = [
 # -------------------------
 # Persistent DB path (works locally and on Streamlit Cloud)
 # -------------------------
-# On Streamlit Cloud, set DB_DIR="/mount/data" in App → Settings → Secrets.
 DB_DIR = st.secrets.get("DB_DIR", ".")
-# Avoid trying to create the managed folder on Streamlit Cloud
-if DB_DIR not in ("/mount/data", "/app/data"):
-    os.makedirs(os.path.expanduser(DB_DIR), exist_ok=True)
+resolved_dir = os.path.expanduser(DB_DIR)
 
-DB_FILE = os.path.join(os.path.expanduser(DB_DIR), "fleet_management.db")
+def _ensure_dir_exists_and_writable(path: str) -> str:
+    # Try to create if not a managed mount. Managed mounts may deny makedirs but still be present/writable.
+    if not os.path.isdir(path):
+        try:
+            os.makedirs(path, exist_ok=True)
+        except PermissionError:
+            # Ignore for managed mounts (/mount/data) which already exist
+            pass
+        except Exception as e:
+            st.error(f"Failed to create DB directory {path}: {e}")
+            st.stop()
+    # Writability probe
+    try:
+        probe = os.path.join(path, ".write_probe")
+        with open(probe, "w") as f:
+            f.write("ok")
+        os.remove(probe)
+    except Exception as e:
+        st.error(f"Database directory is not writable: {path}. Error: {e}")
+        st.stop()
+    return path
+
+# Only ensure for non-managed paths; still probe writability for all
+managed_mounts = {"/mount/data", "/app/data"}
+if resolved_dir not in managed_mounts:
+    resolved_dir = _ensure_dir_exists_and_writable(resolved_dir)
+else:
+    # Probe (without mkdir) even for managed mount to catch permission issues early
+    _ensure_dir_exists_and_writable(resolved_dir)
+
+DB_FILE = os.path.join(resolved_dir, "fleet_management.db")
+st.caption(f"DB file: {DB_FILE}")
 
 # -------------------------
 # DB connection helper
 # -------------------------
 def get_db_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(
-        DB_FILE,
-        detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
-        check_same_thread=False,
-    )
+    try:
+        conn = sqlite3.connect(
+            DB_FILE,
+            detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
+            check_same_thread=False,
+        )
+    except Exception as e:
+        st.error(f"Failed to open SQLite DB at: {DB_FILE}\nError: {e}")
+        raise
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("PRAGMA foreign_keys = ON;")
@@ -79,8 +111,8 @@ def get_db_connection() -> sqlite3.Connection:
 try:
     with get_db_connection() as _c:
         _c.execute("PRAGMA journal_mode=WAL;")
-except Exception:
-    pass
+except Exception as e:
+    st.warning(f"WAL enable failed (non-fatal): {e}")
 
 def close_all_db_connections():
     # No-op now; kept for compatibility
