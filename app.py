@@ -1030,14 +1030,13 @@ def ensure_dispatcher_tables():
         conn.close()
 
 def ensure_truck_dispatcher_link():
-    conn = get_db_connection()
-    cur = conn.cursor()
-    try:
-        conn.execute(text("ALTER TABLE trucks ADD COLUMN dispatcher_id INTEGER")
-    except SQLAlchemyError:
-        pass
-    conn.commit()
-    conn.close()
+    # Use context manager so the connection and transaction are handled properly
+    with get_db_connection() as conn:
+        try:
+            conn.execute(text("ALTER TABLE trucks ADD COLUMN dispatcher_id INTEGER"))
+        except SQLAlchemyError:
+            # Column likely already exists — ignore
+            pass
 
 ensure_dispatcher_tables()
 ensure_truck_dispatcher_link()
