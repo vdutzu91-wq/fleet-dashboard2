@@ -51,39 +51,21 @@ ALL_PAGES = [
 # -------------------------
 # Persistent DB path (works locally and on Streamlit Cloud)
 # -------------------------
-DB_DIR = st.secrets.get("DB_DIR", ".")
-resolved_dir = os.path.expanduser(DB_DIR)
+DB_DIR = st.secrets.get("DB_DIR", "data")  # default to a local "data" folder
+resolved_dir = os.path.abspath(os.path.expanduser(DB_DIR))
 
 def _ensure_dir_exists_and_writable(path: str) -> str:
-    # Try to create if not a managed mount. Managed mounts may deny makedirs but still be present/writable.
+    # Create the folder if missing
     if not os.path.isdir(path):
-        try:
-            os.makedirs(path, exist_ok=True)
-        except PermissionError:
-            # Ignore for managed mounts (/mount/data) which already exist
-            pass
-        except Exception as e:
-            st.error(f"Failed to create DB directory {path}: {e}")
-            st.stop()
-    # Writability probe
-    try:
-        probe = os.path.join(path, ".write_probe")
-        with open(probe, "w") as f:
-            f.write("ok")
-        os.remove(probe)
-    except Exception as e:
-        st.error(f"Database directory is not writable: {path}. Error: {e}")
-        st.stop()
+        os.makedirs(path, exist_ok=True)
+    # Probe writability
+    probe = os.path.join(path, ".write_probe")
+    with open(probe, "w") as f:
+        f.write("ok")
+    os.remove(probe)
     return path
 
-# Only ensure for non-managed paths; still probe writability for all
-managed_mounts = {"/mount/data", "/app/data"}
-if resolved_dir not in managed_mounts:
-    resolved_dir = _ensure_dir_exists_and_writable(resolved_dir)
-else:
-    # Probe (without mkdir) even for managed mount to catch permission issues early
-    _ensure_dir_exists_and_writable(resolved_dir)
-
+resolved_dir = _ensure_dir_exists_and_writable(resolved_dir)
 DB_FILE = os.path.join(resolved_dir, "fleet_management.db")
 st.caption(f"DB file: {DB_FILE}")
 
