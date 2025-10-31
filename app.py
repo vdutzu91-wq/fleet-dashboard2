@@ -62,7 +62,7 @@ def get_pg_conn_url():
     pwd = st.secrets["PGPASSWORD"]
     port = st.secrets.get("PGPORT", "5432")
     sslmode = st.secrets.get("PGSSLMODE", "require")
-    return f"postgresql+psycopg2://{user}:{pwd}@{host}:{port}/{db}?sslmode={sslmode}"
+    return f"postgresql+psycopg://{user}:{pwd}@{host}:{port}/{db}?sslmode={sslmode}"
 
 _engine: Engine | None = None
 
