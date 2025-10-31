@@ -18,6 +18,7 @@ import time
 import mimetypes
 import requests
 from math import isfinite
+from sqlalchemy.exc import SQLAlchemyError
 
 # -------------------------
 # App constants and roles
@@ -628,7 +629,7 @@ def add_or_update_expense_category(name, field_list, default_apply_mode="individ
         try:
             cur.execute("INSERT INTO expense_categories (name, schema_json, default_apply_mode) VALUES (?, ?, ?)",
                         (name, schema_json, default_apply_mode))
-        except sqlite3.IntegrityError:
+        except SQLAlchemyErrorIntegrityError:
             cur.execute("UPDATE expense_categories SET schema_json=?, default_apply_mode=? WHERE name=?",
                         (schema_json, default_apply_mode, name))
         conn.commit()
@@ -803,23 +804,23 @@ def ensure_truck_and_trailer_extra_columns():
     # trucks.notes
     try:
         cur.execute("ALTER TABLE trucks ADD COLUMN notes TEXT")
-    except sqlite3.OperationalError:
+    except SQLAlchemyError:
         pass
     # trucks.color (optional if UI references it)
     try:
         cur.execute("ALTER TABLE trucks ADD COLUMN color TEXT")
-    except sqlite3.OperationalError:
+    except SQLAlchemyError:
         pass
     # trucks.owner (optional if UI references it)
     try:
         cur.execute("ALTER TABLE trucks ADD COLUMN owner TEXT")
-    except sqlite3.OperationalError:
+    except SQLAlchemyError:
         pass
 
     # trailers.trailer_number (your query references it)
     try:
         cur.execute("ALTER TABLE trailers ADD COLUMN trailer_number TEXT")
-    except sqlite3.OperationalError:
+    except SQLAlchemyError:
         pass
 
     # Also ensure dispatcher link table if your query uses it
@@ -851,11 +852,11 @@ def ensure_income_extra_columns():
     # Time fields
     try:
         cur.execute("ALTER TABLE income ADD COLUMN pickup_time TEXT")
-    except sqlite3.OperationalError:
+    except SQLAlchemyError:
         pass
     try:
         cur.execute("ALTER TABLE income ADD COLUMN delivery_time TEXT")
-    except sqlite3.OperationalError:
+    except SQLAlchemyError:
         pass
 
     # Ensure all columns referenced by the Income page exist (idempotent guards)
@@ -882,7 +883,7 @@ def ensure_income_extra_columns():
     ]:
         try:
             cur.execute(sql)
-        except sqlite3.OperationalError:
+        except SQLAlchemyError:
             pass
 
     # Helpful indexes for date-range queries
@@ -903,11 +904,11 @@ def ensure_expenses_fuel_columns():
     cur = conn.cursor()
     try:
         cur.execute("ALTER TABLE expenses ADD COLUMN gallons REAL")
-    except sqlite3.OperationalError:
+    except SQLAlchemyError:
         pass
     try:
         cur.execute("ALTER TABLE expenses ADD COLUMN unit_price REAL")
-    except sqlite3.OperationalError:
+    except SQLAlchemyError:
         pass
     conn.commit()
     conn.close()
@@ -1032,7 +1033,7 @@ def ensure_truck_dispatcher_link():
     cur = conn.cursor()
     try:
         conn.execute(text("ALTER TABLE trucks ADD COLUMN dispatcher_id INTEGER")
-    except sqlite3.OperationalError:
+    except SQLAlchemyError:
         pass
     conn.commit()
     conn.close()
@@ -2144,7 +2145,7 @@ elif page == "Trucks":
 
                         st.success("Truck added successfully!")
                         safe_rerun()
-                    except sqlite3.IntegrityError:
+                    except SQLAlchemyErrorIntegrityError:
                         st.error("Truck number already exists.")
 
 # -------------------------
@@ -2447,7 +2448,7 @@ elif page == "Trailers":
 
                         st.success("Trailer added successfully!")
                         safe_rerun()
-                    except sqlite3.IntegrityError:
+                    except SQLAlchemyErrorIntegrityError:
                         st.error("Trailer number already exists.")
 
 # -------------------------
