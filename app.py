@@ -81,62 +81,6 @@ def get_db_connection():
 # -------------------------
 # DB connection helper
 # -------------------------
-def get_db_connection() -> sqlite3.Connection:
-    try:
-        conn = sqlite3.connect(
-            DB_FILE,
-            detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
-            check_same_thread=False,
-        )
-    except Exception as e:
-        st.error(f"Failed to open SQLite DB at: {DB_FILE}\nError: {e}")
-        raise
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA foreign_keys = ON;")
-    except Exception:
-        pass
-    return conn
-
-# Enable WAL mode once at startup (safe if called multiple times)
-try:
-    with get_db_connection() as _c:
-        _c.execute("PRAGMA journal_mode=WAL;")
-except Exception as e:
-    st.warning(f"WAL enable failed (non-fatal): {e}")
-
-def close_all_db_connections():
-    # No-op now; kept for compatibility
-    pass
-
-def close_all_db_connections_if_any():
-    """
-    Close any long-lived/global DB connections your app might keep open.
-    Modify this to close any global variables you use.
-    """
-    try:
-        for name in ('global_conn', 'global_connection', 'db_conn', 'conn'):
-            if name in globals():
-                obj = globals().get(name)
-                if obj:
-                    try:
-                        obj.close()
-                    except Exception:
-                        pass
-                    try:
-                        globals()[name] = None
-                    except Exception:
-                        pass
-    except Exception:
-        pass
-    try:
-        if 'engine' in globals() and globals().get('engine'):
-            try:
-                globals()['engine'].dispose()
-            except Exception:
-                pass
-    except Exception:
-        pass
 
 # -------------------------
 # Auth and user helpers
@@ -187,7 +131,7 @@ def log_session_action(user_id, username, action, ip_address=None):
             INSERT INTO session_logs (user_id, username, action, ip_address)
             VALUES (?, ?, ?, ?)
         """, (user_id, username, action, ip_address))
-        conn.commit()
+        
         conn.close()
     except Exception:
         # Silent fail for logging
@@ -202,7 +146,7 @@ def update_last_login(user_id):
         SET last_login = CURRENT_TIMESTAMP
         WHERE user_id = ?
     """, (user_id,))
-    conn.commit()
+    
     conn.close()
 
 def can_access_page(page_name):
@@ -559,7 +503,7 @@ def add_attachment_to_expense(expense_id, attachment_dict):
         attachments = get_attachments_for_expense(expense_id)
         attachments.append(attachment_dict)
         cur.execute("UPDATE expenses SET attachments = ? WHERE expense_id = ?", (json.dumps(attachments), expense_id))
-        conn.commit()
+        
     finally:
         conn.close()
 
@@ -572,7 +516,7 @@ def remove_attachment_from_expense(expense_id, attachment_index):
         if 0 <= attachment_index < len(attachments):
             attachments.pop(attachment_index)
             cur.execute("UPDATE expenses SET attachments = ? WHERE expense_id = ?", (json.dumps(attachments), expense_id))
-            conn.commit()
+            
     finally:
         conn.close()
 
@@ -633,7 +577,7 @@ def add_or_update_expense_category(name, field_list, default_apply_mode="individ
         except SQLAlchemyErrorIntegrityError:
             cur.execute("UPDATE expense_categories SET schema_json=?, default_apply_mode=? WHERE name=?",
                         (schema_json, default_apply_mode, name))
-        conn.commit()
+        
     finally:
         conn.close()
 
@@ -671,12 +615,12 @@ def ensure_expenses_attachments():
         columns = [row[1] for row in cur.fetchall()]
         if "attachments" not in columns:
             cur.execute("ALTER TABLE expenses ADD COLUMN attachments TEXT")
-            conn.commit()
+            
         cur.execute("CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(date)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_expenses_category ON expenses(category)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_expenses_truck_id ON expenses(truck_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_expenses_date_category ON expenses(date, category)")
-        conn.commit()
+        
     finally:
         conn.close()
 
@@ -841,7 +785,7 @@ def ensure_truck_and_trailer_extra_columns():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_tdl_truck ON truck_dispatcher_link(truck_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_tdl_dispatcher ON truck_dispatcher_link(dispatcher_id)")
 
-    conn.commit()
+    
     conn.close()
 
 # Call it after init_database()
@@ -894,7 +838,7 @@ def ensure_income_extra_columns():
     except Exception:
         pass
 
-    conn.commit()
+    
     conn.close()
 
 # Call this during startup, after init_database()
@@ -911,7 +855,7 @@ def ensure_expenses_fuel_columns():
         cur.execute("ALTER TABLE expenses ADD COLUMN unit_price REAL")
     except SQLAlchemyError:
         pass
-    conn.commit()
+    
     conn.close()
 
 ensure_expenses_fuel_columns()
@@ -983,7 +927,7 @@ def migrate_trailer_history_add_truck_id(conn):
     cur.execute("CREATE INDEX IF NOT EXISTS idx_tth_trailer_id ON trailer_truck_history(trailer_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_tth_truck_id   ON trailer_truck_history(truck_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_tth_dates      ON trailer_truck_history(start_date, end_date)")
-    conn.commit()
+    
 
 init_history_tables()
 # Run one-time migration: add truck_id to trailer history and backfill
@@ -1044,55 +988,56 @@ ensure_dispatcher_tables()
 ensure_truck_dispatcher_link()
 
 def add_dispatcher(name, phone=None, email=None, notes=None):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    conn.execute(text("INSERT INTO dispatchers (name, phone, email, notes) VALUES (?, ?, ?, ?)",
-                (name.strip(), phone, email, notes))
-    conn.commit()
-    dispatcher_id = cur.lastrowid
-    conn.close()
-    return dispatcher_id
+    with get_db_connection() as conn:
+        try:
+            conn.execute(text("""
+                INSERT INTO dispatchers (name, phone, email, notes)
+                VALUES (:name, :phone, :email, :notes)
+                ON CONFLICT (name) DO NOTHING
+            """), {
+                "name": name.strip(),
+                "phone": phone,
+                "email": email,
+                "notes": notes
+            })
+        except SQLAlchemyError as e:
+            st.error(f"Failed to add dispatcher: {e}")
 
 def update_dispatcher(dispatcher_id, name, phone=None, email=None, notes=None):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    conn.execute(text("UPDATE dispatchers SET name=?, phone=?, email=?, notes=? WHERE dispatcher_id=?",
-                (name.strip(), phone, email, notes, dispatcher_id))
-    conn.commit()
-    conn.close()
+    with get_db_connection() as conn:
+        try:
+            conn.execute(text("""
+                UPDATE dispatchers
+                SET name = :name, phone = :phone, email = :email, notes = :notes
+                WHERE dispatcher_id = :id
+            """), {"name": name.strip(), "phone": phone, "email": email, "notes": notes, "id": dispatcher_id})
+        except SQLAlchemyError as e:
+            st.error(f"Failed to update dispatcher: {e}")
 
 def delete_dispatcher(dispatcher_id):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    conn.execute(text("DELETE FROM dispatcher_trucks WHERE dispatcher_id=?", (dispatcher_id,))
-    conn.execute(text("DELETE FROM dispatchers WHERE dispatcher_id=?", (dispatcher_id,))
-    conn.commit()
-    conn.close()
+    with get_db_connection() as conn:
+        try:
+            conn.execute(text("DELETE FROM dispatcher_trucks WHERE dispatcher_id = :id"), {"id": dispatcher_id})
+            conn.execute(text("DELETE FROM dispatchers WHERE dispatcher_id = :id"), {"id": dispatcher_id})
+        except SQLAlchemyError as e:
+            st.error(f"Failed to delete dispatcher: {e}")
 
 def get_all_dispatchers():
-    conn = get_db_connection()
-    cur = conn.cursor()
-    conn.execute(text("SELECT dispatcher_id, name, phone, email, notes, created_at FROM dispatchers ORDER BY name")
-    rows = cur.fetchall()
-    conn.close()
-    return [{"dispatcher_id": r[0], "name": r[1], "phone": r[2], "email": r[3], "notes": r[4], "created_at": r[5]} for r in rows]
+    with get_db_connection() as conn:
+        res = conn.execute(text("""
+            SELECT dispatcher_id, name, phone, email, notes, created_at
+            FROM dispatchers ORDER BY name
+        """))
+        rows = res.fetchall()
+        return [dict(r._mapping) for r in rows]
 
 def get_trucks_for_dispatcher(dispatcher_id):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    conn.execute(text("SELECT truck_id FROM dispatcher_trucks WHERE dispatcher_id = ?", (dispatcher_id,))
-    rows = cur.fetchall()
-    conn.close()
-    return [r[0] for r in rows]
-
-def assign_trucks_to_dispatcher(dispatcher_id, truck_id_list):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    conn.execute(text("DELETE FROM dispatcher_trucks WHERE dispatcher_id = ?", (dispatcher_id,))
-    for tid in set([int(t) for t in truck_id_list if t is not None]):
-        cur.execute("INSERT INTO dispatcher_trucks (dispatcher_id, truck_id) VALUES (?, ?)", (dispatcher_id, tid))
-    conn.commit()
-    conn.close()
+    with get_db_connection() as conn:
+        res = conn.execute(text("""
+            SELECT truck_id FROM dispatcher_trucks
+            WHERE dispatcher_id = :id
+        """), {"id": dispatcher_id})
+        return [r[0] for r in res.fetchall()]
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -1139,7 +1084,7 @@ def safe_delete_all_rows(table_name: str):
         cur = conn.cursor()
         conn.execute(text("PRAGMA foreign_keys = OFF;")
         conn.execute(text(f"DELETE FROM {table_name};")
-        conn.commit()
+        
     except Exception:
         conn.rollback()
         raise
@@ -1162,7 +1107,7 @@ def safe_delete_one(table_name: str, key_col: str, key_val):
         except Exception:
             conn.execute(text("PRAGMA foreign_keys = OFF;")
             conn.execute(text(f"DELETE FROM {table_name} WHERE {key_col} = ?;", (key_val,))
-        conn.commit()
+        
     except Exception:
         conn.rollback()
         raise
@@ -1251,7 +1196,7 @@ def set_loan_history(entity_type: str, entity_id: int, monthly_amount: float, st
         INSERT INTO loans_history (entity_type, entity_id, monthly_amount, start_date, note)
         VALUES (?, ?, ?, ?, ?)
     """, (entity_type, entity_id, monthly_amount, start_date, note))
-    conn.commit()
+    
     conn.close()
 
 def get_prorated_loan_for_entity(entity_type: str, entity_id: int, range_start: date, range_end: date) -> float:
@@ -1298,12 +1243,12 @@ def upsert_current_loan(entity_type: str, entity_id: int, monthly_amount: float,
         old_s = date.fromisoformat(old_s_str)
         if new_e:
             cur.execute("UPDATE loans_history SET end_date = ? WHERE id = ?", (ds(new_e), open_id))
-            conn.commit()
+            
             conn.close()
             return
         if new_amt <= 0:
             cur.execute("UPDATE loans_history SET end_date = ? WHERE id = ?", (ds(today_d), open_id))
-            conn.commit()
+            
             conn.close()
             return
         if new_s > old_s:
@@ -1313,19 +1258,19 @@ def upsert_current_loan(entity_type: str, entity_id: int, monthly_amount: float,
                 INSERT INTO loans_history (entity_type, entity_id, monthly_amount, start_date, end_date)
                 VALUES (?, ?, ?, ?, NULL)
             """, (entity_type, entity_id, new_amt, ds(new_s)))
-            conn.commit()
+            
             conn.close()
             return
         if new_s == old_s:
             if float(old_amt) != new_amt:
                 cur.execute("UPDATE loans_history SET monthly_amount = ? WHERE id = ?", (new_amt, open_id))
-                conn.commit()
+                
                 conn.close()
             else:
                 conn.close()
             return
         cur.execute("UPDATE loans_history SET start_date = ?, monthly_amount = ? WHERE id = ?", (ds(new_s), new_amt, open_id))
-        conn.commit()
+        
         conn.close()
         return
     if new_amt <= 0:
@@ -1335,7 +1280,7 @@ def upsert_current_loan(entity_type: str, entity_id: int, monthly_amount: float,
         INSERT INTO loans_history (entity_type, entity_id, monthly_amount, start_date, end_date)
         VALUES (?, ?, ?, ?, ?)
     """, (entity_type, entity_id, new_amt, ds(new_s), ds(new_e)))
-    conn.commit()
+    
     conn.close()
 
 # -------------------------
@@ -1362,7 +1307,7 @@ def record_trailer_assignment(trailer_id: int, new_truck_id: int, start_date: da
         VALUES (?, ?, ?, ?, ?, ?)
     """, (trailer_id, old_truck_id, new_truck_id, new_truck_id, start_date, note))
     cur.execute("UPDATE trailers SET truck_id=? WHERE trailer_id=?", (new_truck_id, trailer_id))
-    conn.commit()
+    
     conn.close()
 
 def record_driver_assignment(driver_id: int, truck_id: int=None, trailer_id: int=None, start_date: date=None, note: str=None):
@@ -1386,7 +1331,7 @@ def record_driver_assignment(driver_id: int, truck_id: int=None, trailer_id: int
     """, (driver_id, truck_id, trailer_id, start_date, note))
     if truck_id:
         cur.execute("UPDATE trucks SET driver_id=? WHERE truck_id=?", (driver_id, truck_id))
-    conn.commit()
+    
     conn.close()
 
 # -------------------------
@@ -1436,7 +1381,7 @@ def delete_record(table, id_column, record_id):
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute(f"DELETE FROM {table} WHERE {id_column} = ?", (record_id,))
-    conn.commit()
+    
     conn.close()
 
 def get_current_dispatcher_for_truck(conn, truck_id: int) -> str:
@@ -1548,7 +1493,7 @@ def seed_existing_loans_start():
                 INSERT INTO loans_history (entity_type, entity_id, monthly_amount, start_date, note)
                 VALUES (?, ?, ?, ?, ?)
             """, ('trailer', trailer_id, loan, '2000-01-01', 'seed from existing data'))
-    conn.commit()
+    
     conn.close()
 
 seed_existing_loans_start()
@@ -1666,7 +1611,7 @@ with st.sidebar:
                         new_hash = hash_password(new_pw)
                         conn.execute("UPDATE users SET password_hash = ? WHERE user_id = ?", 
                                    (new_hash, st.session_state.user["user_id"]))
-                        conn.commit()
+                        
                         conn.close()
                         log_session_action(st.session_state.user["user_id"], st.session_state.user["username"], "changed_password")
                         st.success("Password changed successfully!")
@@ -2053,7 +1998,7 @@ elif page == "Trucks":
                                         selected_truck,
                                     ),
                                 )
-                                conn.commit()
+                                
 
                                 # Update trailer linkage in trailers table
                                 # 1) Unassign this truck from any trailers if "No Trailer Assigned" chosen
@@ -2067,7 +2012,7 @@ elif page == "Trucks":
                                     cur.execute("UPDATE trailers SET truck_id = ? WHERE trailer_id = ?", (selected_truck, new_trailer_id))
                                     # 3) Also ensure no other trailers remain linked to this truck (single trailer per truck policy)
                                     cur.execute("UPDATE trailers SET truck_id = NULL WHERE truck_id = ? AND trailer_id <> ?", (selected_truck, new_trailer_id))
-                                conn.commit()
+                                
                                 conn.close()
 
                                 # Loan history upsert
@@ -2146,7 +2091,7 @@ elif page == "Trucks":
                             (number, make, model, year, plate, vin, status, loan_amount, driver_id, dispatcher_id),
                         )
                         truck_id = cur.lastrowid
-                        conn.commit()
+                        
                         conn.close()
 
                         if loan_amount and loan_amount > 0:
@@ -2353,7 +2298,7 @@ elif page == "Trailers":
                                         selected_trailer,
                                     ),
                                 )
-                                conn.commit()
+                                
                                 conn.close()
 
                                 # Always upsert loan interval so date-only changes persist
@@ -2448,7 +2393,7 @@ elif page == "Trailers":
                             (number, trailer_type, year, plate, vin, status, loan_amount, truck_id),
                         )
                         trailer_id = cur.lastrowid
-                        conn.commit()
+                        
                         conn.close()
 
                         if loan_amount and loan_amount > 0:
@@ -2518,7 +2463,7 @@ elif page == "Drivers":
                                     UPDATE drivers SET name=?, license_number=?, phone=?, email=?, hire_date=?, status=?
                                     WHERE driver_id=?
                                 """, (new_name, new_license, new_phone, new_email, new_hire_date, new_status, selected_driver))
-                                conn.commit()
+                                
                                 conn.close()
                                 st.success("Driver updated successfully!")
                                 del st.session_state.editing_driver
@@ -2548,7 +2493,7 @@ elif page == "Drivers":
                         INSERT INTO drivers (name, license_number, phone, email, hire_date, status)
                         VALUES (?, ?, ?, ?, ?, ?)
                     """, (name, license_number, phone, email, hire_date, status))
-                    conn.commit()
+                    
                     conn.close()
                     st.success("Driver added successfully!")
                     safe_rerun()
@@ -3306,7 +3251,7 @@ if page == "Income":
                 """)
                 
                 rows_affected = cur.rowcount
-                conn.commit()
+                
                 conn.close()
                 
                 st.success(f"✅ Fixed ZIP codes! Updated {rows_affected} records.")
@@ -3932,7 +3877,7 @@ if page == "Income":
                                  new_delivery_date, str(new_delivery_time) if new_delivery_time else None, new_delivery_address,
                                  selected_income)
                             )
-                            conn.commit()
+                            
                             conn.close()
                             st.success("Income updated!")
                             del st.session_state.editing_income
@@ -4037,7 +3982,7 @@ if page == "Income":
                                 delivery_date_val, delivery_time_val, delivery_city_val, delivery_state_val, delivery_zip_val, delivery_full_address_val, delivery_full_address_val,
                                 rpm_val, empty_miles_val, loaded_miles_val
                             ))
-                        conn.commit()
+                        
                         conn.close()
                         st.success("Income added!")
                         safe_rerun()
@@ -4157,7 +4102,7 @@ elif page == "Bulk Upload":
                             except Exception as row_e:
                                 errors.append(f"Row {idx+1}: {row_e}")
 
-                        conn.commit()
+                        
                     except Exception as e:
                         st.error(f"Upload failed: {e}")
                         st.text(traceback.format_exc())
@@ -4288,7 +4233,7 @@ elif page == "Bulk Upload":
                             except Exception as row_e:
                                 errors.append(f"Row {idx+1}: {row_e}")
 
-                        conn.commit()
+                        
 
                     except Exception as e:
                         st.error(f"Upload failed: {e}")
@@ -4470,7 +4415,7 @@ elif page == "Bulk Upload":
                             except Exception as e:
                                 errors.append(f"Row {idx+1}: {e}")
 
-                        conn.commit()
+                        
                         conn.close()
                         st.success(f"Uploaded {success_count} expense records for category {selected_category}.")
                         if created_trucks:
@@ -4689,7 +4634,7 @@ elif page == "Bulk Upload":
                                 errors.append(f"Row {idx+2}: {str(e)}")
                                 error_count += 1
                     
-                        conn.commit()
+                        
                         conn.close()
                     
                         st.success(f"✅ Successfully uploaded {success_count} income records!")
@@ -5412,7 +5357,7 @@ elif page == "👥 User Management":
                         conn = get_db_connection()
                         conn.execute("UPDATE users SET allowed_pages = ? WHERE user_id = ?", 
                                (json.dumps(new_pages), user['user_id']))
-                        conn.commit()
+                        
                         conn.close()
                         log_session_action(st.session_state.user["user_id"], st.session_state.user["username"], 
                                          f"updated_pages_for_{user['username']}")
@@ -5436,7 +5381,7 @@ elif page == "👥 User Management":
                                            (new_role, json.dumps(ALL_PAGES), user['user_id']))
                             else:
                                 conn.execute("UPDATE users SET role = ? WHERE user_id = ?", (new_role, user['user_id']))
-                            conn.commit()
+                            
                             conn.close()
                             log_session_action(st.session_state.user["user_id"], st.session_state.user["username"], 
                                              f"changed_role_for_{user['username']}_to_{new_role}")
@@ -5451,7 +5396,7 @@ elif page == "👥 User Management":
                                 else:
                                     conn = get_db_connection()
                                     conn.execute("UPDATE users SET is_active = 0 WHERE user_id = ?", (user['user_id'],))
-                                    conn.commit()
+                                    
                                     conn.close()
                                     log_session_action(st.session_state.user["user_id"], st.session_state.user["username"], 
                                                      f"deactivated_user_{user['username']}")
@@ -5461,7 +5406,7 @@ elif page == "👥 User Management":
                             if st.button("✅ Activate", key=f"activate_{user['user_id']}"):
                                 conn = get_db_connection()
                                 conn.execute("UPDATE users SET is_active = 1 WHERE user_id = ?", (user['user_id'],))
-                                conn.commit()
+                                
                                 conn.close()
                                 log_session_action(st.session_state.user["user_id"], st.session_state.user["username"], 
                                                  f"activated_user_{user['username']}")
@@ -5474,7 +5419,7 @@ elif page == "👥 User Management":
                             password_hash = hash_password(new_password)
                             conn = get_db_connection()
                             conn.execute("UPDATE users SET password_hash = ? WHERE user_id = ?", (password_hash, user['user_id']))
-                            conn.commit()
+                            
                             conn.close()
                             log_session_action(st.session_state.user["user_id"], st.session_state.user["username"], 
                                              f"reset_password_for_{user['username']}")
@@ -5525,7 +5470,7 @@ elif page == "👥 User Management":
                             INSERT INTO users (username, password_hash, full_name, email, role, allowed_pages, is_active)
                             VALUES (?, ?, ?, ?, ?, ?, 1)
                         """, (new_username, password_hash, new_full_name, new_email, new_role, allowed_pages_json))
-                        conn.commit()
+                        
                         conn.close()
                         log_session_action(st.session_state.user["user_id"], st.session_state.user["username"], 
                                          f"created_user_{new_username}")
