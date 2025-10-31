@@ -1029,13 +1029,15 @@ def ensure_dispatcher_tables():
     finally:
         conn.close()
 
-def ensure_truck_dispatcher_link():
-    # Use context manager so the connection and transaction are handled properly
+def ensure_dispatcher_truck_link(dispatcher_id: int, truck_id: int):
     with get_db_connection() as conn:
         try:
-            conn.execute(text("ALTER TABLE trucks ADD COLUMN dispatcher_id INTEGER"))
+            conn.execute(text("""
+                INSERT INTO dispatcher_trucks (dispatcher_id, truck_id)
+                VALUES (:dispatcher_id, :truck_id)
+                ON CONFLICT (dispatcher_id, truck_id) DO NOTHING
+            """), {"dispatcher_id": dispatcher_id, "truck_id": truck_id})
         except SQLAlchemyError:
-            # Column likely already exists — ignore
             pass
 
 ensure_dispatcher_tables()
@@ -1044,7 +1046,7 @@ ensure_truck_dispatcher_link()
 def add_dispatcher(name, phone=None, email=None, notes=None):
     conn = get_db_connection()
     cur = conn.cursor()
-    conn.execute(text("INSERT OR IGNORE INTO dispatchers (name, phone, email, notes) VALUES (?, ?, ?, ?)",
+    conn.execute(text("INSERT INTO dispatchers (name, phone, email, notes) VALUES (?, ?, ?, ?)",
                 (name.strip(), phone, email, notes))
     conn.commit()
     dispatcher_id = cur.lastrowid
@@ -1088,9 +1090,30 @@ def assign_trucks_to_dispatcher(dispatcher_id, truck_id_list):
     cur = conn.cursor()
     conn.execute(text("DELETE FROM dispatcher_trucks WHERE dispatcher_id = ?", (dispatcher_id,))
     for tid in set([int(t) for t in truck_id_list if t is not None]):
-        cur.execute("INSERT OR IGNORE INTO dispatcher_trucks (dispatcher_id, truck_id) VALUES (?, ?)", (dispatcher_id, tid))
+        cur.execute("INSERT INTO dispatcher_trucks (dispatcher_id, truck_id) VALUES (?, ?)", (dispatcher_id, tid))
     conn.commit()
     conn.close()
+
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+
+def seed_default_dispatcher():
+    # Ensure 'name' is UNIQUE in your dispatchers table definition
+    with get_db_connection() as conn:
+        try:
+            conn.execute(text("""
+                INSERT INTO dispatchers (name, phone, email, notes)
+                VALUES (:name, :phone, :email, :notes)
+                ON CONFLICT (name) DO NOTHING
+            """), {
+                "name": "Default Dispatcher",
+                "phone": None,
+                "email": None,
+                "notes": "Seeded automatically"
+            })
+        except SQLAlchemyError as e:
+            # Optional: st.warning(f"Could not seed dispatcher: {e}")
+            pass
 
 # -------------------------
 # Safe rerun helper
