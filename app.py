@@ -129,7 +129,7 @@ def log_session_action(user_id, username, action, ip_address=None):
         cur = conn.cursor()
         cur.execute("""
             INSERT INTO session_logs (user_id, username, action, ip_address)
-            VALUES (?, ?, ?, ?)
+            VALUES (:user_id, :username, :action, :ip_address)
         """, (user_id, username, action, ip_address))
         
         conn.close()
@@ -572,7 +572,7 @@ def add_or_update_expense_category(name, field_list, default_apply_mode="individ
         cur = conn.cursor()
         schema_json = json.dumps(field_list)
         try:
-            cur.execute("INSERT INTO expense_categories (name, schema_json, default_apply_mode) VALUES (?, ?, ?)",
+            cur.execute("INSERT INTO expense_categories (name, schema_json, default_apply_mode) VALUES (:name, :schema_json, :default_apply_mode)",
                         (name, schema_json, default_apply_mode))
         except SQLAlchemyErrorIntegrityError:
             cur.execute("UPDATE expense_categories SET schema_json=?, default_apply_mode=? WHERE name=?",
@@ -1194,7 +1194,7 @@ def set_loan_history(entity_type: str, entity_id: int, monthly_amount: float, st
         cur.execute("UPDATE loans_history SET end_date=? WHERE id=?", (prev_end, prev_id))
     cur.execute("""
         INSERT INTO loans_history (entity_type, entity_id, monthly_amount, start_date, note)
-        VALUES (?, ?, ?, ?, ?)
+        VALUES ("entity_type, :entity_id, :monthly_amount, :start_date, :note)
     """, (entity_type, entity_id, monthly_amount, start_date, note))
     
     conn.close()
@@ -1256,7 +1256,7 @@ def upsert_current_loan(entity_type: str, entity_id: int, monthly_amount: float,
             cur.execute("UPDATE loans_history SET end_date = ? WHERE id = ?", (ds(end_prev), open_id))
             cur.execute("""
                 INSERT INTO loans_history (entity_type, entity_id, monthly_amount, start_date, end_date)
-                VALUES (?, ?, ?, ?, NULL)
+                VALUES (:entity_type, :entity_id, :monthly_amount, :start_date, NULL)
             """, (entity_type, entity_id, new_amt, ds(new_s)))
             
             conn.close()
@@ -1278,7 +1278,7 @@ def upsert_current_loan(entity_type: str, entity_id: int, monthly_amount: float,
         return
     cur.execute("""
         INSERT INTO loans_history (entity_type, entity_id, monthly_amount, start_date, end_date)
-        VALUES (?, ?, ?, ?, ?)
+        VALUES (:entity_type, :entity_id, :monthly_amount, :start_date, :end_date)
     """, (entity_type, entity_id, new_amt, ds(new_s), ds(new_e)))
     
     conn.close()
@@ -1304,7 +1304,7 @@ def record_trailer_assignment(trailer_id: int, new_truck_id: int, start_date: da
         cur.execute("UPDATE trailer_truck_history SET end_date=? WHERE id=?", (prev_end, prev_id))
     cur.execute("""
         INSERT INTO trailer_truck_history (trailer_id, old_truck_id, new_truck_id, truck_id, start_date, note)
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (:trailer_id, :old_truck_id, :new_truck_id, :truck_id, :start_date, :note)
     """, (trailer_id, old_truck_id, new_truck_id, new_truck_id, start_date, note))
     cur.execute("UPDATE trailers SET truck_id=? WHERE trailer_id=?", (new_truck_id, trailer_id))
     
@@ -1327,7 +1327,7 @@ def record_driver_assignment(driver_id: int, truck_id: int=None, trailer_id: int
         cur.execute("UPDATE driver_assignment_history SET end_date=? WHERE id=?", (prev_end, prev_id))
     cur.execute("""
         INSERT INTO driver_assignment_history (driver_id, truck_id, trailer_id, start_date, note)
-        VALUES (?, ?, ?, ?, ?)
+        VALUES (:driver_id, :truck_id, :trailer_id, start_date, :note)
     """, (driver_id, truck_id, trailer_id, start_date, note))
     if truck_id:
         cur.execute("UPDATE trucks SET driver_id=? WHERE truck_id=?", (driver_id, truck_id))
@@ -1482,7 +1482,7 @@ def seed_existing_loans_start():
         if cur.fetchone()[0] == 0:
             cur.execute("""
                 INSERT INTO loans_history (entity_type, entity_id, monthly_amount, start_date, note)
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (:entity_type, :entity_id, :monthly_amount, :start_date, :note)
             """, ('truck', truck_id, loan, '2000-01-01', 'seed from existing data'))
     # trailers
     cur.execute("SELECT trailer_id, loan_amount FROM trailers WHERE loan_amount IS NOT NULL AND loan_amount>0")
@@ -1491,7 +1491,7 @@ def seed_existing_loans_start():
         if cur.fetchone()[0] == 0:
             cur.execute("""
                 INSERT INTO loans_history (entity_type, entity_id, monthly_amount, start_date, note)
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (:entity_type, :entity_id, :monthly_amount, :start_date, :note)
             """, ('trailer', trailer_id, loan, '2000-01-01', 'seed from existing data'))
     
     conn.close()
@@ -2086,7 +2086,7 @@ elif page == "Trucks":
                         cur.execute(
                             """
                             INSERT INTO trucks (number, make, model, year, plate, vin, status, loan_amount, driver_id, dispatcher_id)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            VALUES (:number, :make, :model, :year, :plate, :vin, :status, :loan_amount, :driver_id, :dispatcher_id)
                             """,
                             (number, make, model, year, plate, vin, status, loan_amount, driver_id, dispatcher_id),
                         )
@@ -2388,7 +2388,7 @@ elif page == "Trailers":
                         cur.execute(
                             """
                             INSERT INTO trailers (number, type, year, plate, vin, status, loan_amount, truck_id)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            VALUES (:number, :type, :year, :plate, :vin, :status, :loan_amount, :truck_id)
                             """,
                             (number, trailer_type, year, plate, vin, status, loan_amount, truck_id),
                         )
@@ -2491,7 +2491,7 @@ elif page == "Drivers":
                     cur = conn.cursor()
                     cur.execute("""
                         INSERT INTO drivers (name, license_number, phone, email, hire_date, status)
-                        VALUES (?, ?, ?, ?, ?, ?)
+                        VALUES (:name, :license_number, :phone, :email, :hire_date, :status)
                     """, (name, license_number, phone, email, hire_date, status))
                     
                     conn.close()
@@ -2753,12 +2753,12 @@ elif page == "Expenses":
                         for i, tid in enumerate(uniq):
                             cur.execute("""
                                 INSERT INTO expenses (date, category, amount, truck_id, description, metadata, apply_mode, attachments, gallons)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                VALUES (:date, :category, :amount, :truck_id, :description, :metadata, :apply_mode, :attachments, :gallons)
                             """, (ad_date, cat_name, amounts[i], tid, "", json.dumps(meta), "divide", json.dumps(attachments), gallons_per))
                     else:
                         cur.execute("""
                             INSERT INTO expenses (date, category, amount, truck_id, description, metadata, apply_mode, attachments, gallons)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            VALUES (:date, :category, :amount, :truck_id, :description, :metadata, :apply_mode, :attachments, :gallons)
                         """, (ad_date, cat_name, ad_amount, selected_truck_id, "", json.dumps(meta), ad_apply, json.dumps(attachments), ad_gallons))
 
                     conn_a.commit()
@@ -3974,7 +3974,7 @@ if page == "Income":
                                     delivery_date, delivery_time, delivery_city, delivery_state, delivery_zip, delivery_address, delivery_full_address,
                                     rpm, empty_miles, loaded_miles
                                 )
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                VALUES (:date, :source, :amount, :truck_id, :description, :driver_name, :broker_number, :tonu, :stops, :pickup_date, :pickup_time, :pickup_city, :pickup_state, :pickup_zip, :pickup_address, :pickup_full_address, :delivery_date, :delivery_time, :delivery_city, :delivery_state, :delivery_zip, :delivery_address, :delivery_full_address, :rpm, :empty_miles, :loaded_miles)
                             """, (
                                 date_val, source_val, amount_val, truck_id, load_number_val,
                                 driver_val, broker_val, tonu_val, stops_val,
@@ -4063,7 +4063,7 @@ elif page == "Bulk Upload":
                                         driver_id = found[0]
                                     elif create_missing_drivers and ident:
                                         # create a minimal driver record
-                                        cur2.execute("INSERT INTO drivers (name, license_number, status) VALUES (?, ?, ?)", (ident, None, "Active"))
+                                        cur2.execute("INSERT INTO drivers (name, license_number, status) VALUES (:name, :license_number, :status)", (ident, None, "Active"))
                                         driver_id = cur2.lastrowid
                                         created_drivers += 1
 
@@ -4086,7 +4086,7 @@ elif page == "Bulk Upload":
 
                                 cur.execute("""
                                     INSERT INTO trucks (number, make, model, year, plate, vin, status, loan_amount, driver_id, dispatcher_id)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    VALUES (:number, :make, :model, :year, :plate, :vin, :status, :loan_amount, :driver_id, :dispatcher_id)
                                 """, (number, make, model, year, plate, vin, status, loan_amount, driver_id, dispatcher_id))
                                 truck_id = cur.lastrowid
 
@@ -4208,7 +4208,7 @@ elif page == "Bulk Upload":
                                         new_vin = ident if truck_id_type == "VIN" else None
                                         cur.execute("""
                                             INSERT INTO trucks (number, make, model, year, plate, vin, status, loan_amount)
-                                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                            VALUES (:number, :make, :model, :year, :plate, :vin, :status, :loan_amount)
                                         """, (new_number, None, None, None, new_plate, new_vin, "Active", 0.0))
                                         linked_truck_id = cur.lastrowid
                                         created_trucks += 1
@@ -4220,7 +4220,7 @@ elif page == "Bulk Upload":
 
                                 cur.execute("""
                                     INSERT INTO trailers (number, type, year, plate, vin, status, loan_amount, truck_id)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                    VALUES (:number, :type, :year, :plate, :vin, :status, :loan_amount, :truck_id)
                                 """, (trailer_number, trailer_type, trailer_year, trailer_plate, trailer_vin, trailer_status, trailer_loan, linked_truck_id))
                                 trailer_id = cur.lastrowid
 
@@ -4335,7 +4335,7 @@ elif page == "Bulk Upload":
                                     ident = normalize(row[mapping["truck_number_col"]])
                                     truck_id = number_map.get(ident) or plate_map.get(ident) or vin_map.get(ident)
                                     if truck_id is None and create_missing_trucks and ident:
-                                        cur.execute("INSERT INTO trucks (number, make, model, year, plate, vin, status, loan_amount) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                                        cur.execute("INSERT INTO trucks (number, make, model, year, plate, vin, status, loan_amount) VALUES (:number, :make, :model, :year, :plate, :vin, :status, :loan_amount)",
                                                     (ident, None, None, None, None, None, "Active", 0.0))
                                         truck_id = cur.lastrowid
                                         created_trucks += 1
@@ -4408,7 +4408,7 @@ elif page == "Bulk Upload":
                                 # Insert into DB
                                 cur.execute("""
                                     INSERT INTO expenses (date, category, amount, truck_id, description, metadata, apply_mode, gallons)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                    VALUES (:date, :category, :amount, :truck_id, :description, :metadata, :apply_mode, :gallons)
                                 """, (date_val, selected_category, float(amount_val or 0.0), truck_id, None, json.dumps(metadata), cat.get("default_apply_mode", "individual"), gallons_val))
                                 success_count += 1
 
@@ -4619,7 +4619,7 @@ elif page == "Bulk Upload":
                                         delivery_date, delivery_time, delivery_city, delivery_state, delivery_zip, delivery_full_address,
                                         rpm, empty_miles, loaded_miles
                                     )
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    VALUES (:date, :source, :amount, :truck_id, :description, :driver_name, :broker_number, :tonu, :stops, :pickup_date, :pickup_time, :pickup_city, :pickup_state, :pickup_zip, :pickup_full_address, :delivery_date, :delivery_time, :delivery_city, :delivery_state, :delivery_zip, :delivery_full_address, :rpm, :empty_miles, :loaded_miles)
                                 """, (
                                     date_val, source_val, amount_val, truck_id, load_number_val,
                                     driver_val, broker_val, tonu_val, stops_val,
@@ -5468,7 +5468,7 @@ elif page == "👥 User Management":
                         allowed_pages_json = json.dumps(selected_pages)
                         conn.execute("""
                             INSERT INTO users (username, password_hash, full_name, email, role, allowed_pages, is_active)
-                            VALUES (?, ?, ?, ?, ?, ?, 1)
+                            VALUES (:username, :password_hash, :full_name, :email, :role, :allowed_pages, 1)
                         """, (new_username, password_hash, new_full_name, new_email, new_role, allowed_pages_json))
                         
                         conn.close()
