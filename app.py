@@ -704,7 +704,7 @@ def ensure_expense_categories_table():
         for alter in ("ALTER TABLE expenses ADD COLUMN metadata TEXT",
                       "ALTER TABLE expenses ADD COLUMN apply_mode TEXT"):
             try:
-                conn.execute(alter))
+                conn.execute(alter)
             except SQLAlchemyError:
                 pass
     finally:
