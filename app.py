@@ -1,5 +1,4 @@
 import streamlit as st
-import sqlite3
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -57,14 +56,147 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
+
+# ==============================================================================
+# PostgreSQL Compatibility Wrappers
+# ==============================================================================
+# These classes make SQLAlchemy connections work with SQLite-style code
+
+from contextlib import contextmanager
+from sqlalchemy import text as sql_text
+
+class PostgresCursor:
+    """Wrapper to make SQLAlchemy connection work like sqlite3 cursor"""
+    def __init__(self, connection):
+        self.connection = connection
+        self.result = None
+        self.lastrowid = None
+        
+    def execute(self, query, params=None):
+        """Execute query with parameter substitution"""
+        # Convert ? placeholders to :param1, :param2, etc.
+        if params and '?' in query:
+            param_dict = {}
+            parts = query.split('?')
+            new_query = parts[0]
+            for i, part in enumerate(parts[1:]):
+                param_name = f'param{i}'
+                new_query += f':{param_name}' + part
+                param_dict[param_name] = params[i] if i < len(params) else None
+            query = new_query
+            params = param_dict
+        
+        # Wrap in text() if not already
+        if params:
+            self.result = self.connection.execute(sql_text(query), params)
+        else:
+            self.result = self.connection.execute(sql_text(query))
+        
+        # Try to get lastrowid
+        try:
+            if self.result and hasattr(self.result, 'lastrowid'):
+                self.lastrowid = self.result.lastrowid
+            elif self.result and hasattr(self.result, 'inserted_primary_key'):
+                pk = self.result.inserted_primary_key
+                self.lastrowid = pk[0] if pk else None
+        except:
+            pass
+        
+        return self
+    
+    def fetchone(self):
+        """Fetch one result"""
+        if self.result:
+            row = self.result.fetchone()
+            return tuple(row) if row else None
+        return None
+    
+    def fetchall(self):
+        """Fetch all results"""
+        if self.result:
+            return [tuple(row) for row in self.result.fetchall()]
+        return []
+    
+    def close(self):
+        """Close cursor (no-op for our wrapper)"""
+        if self.result:
+            try:
+                self.result.close()
+            except:
+                pass
+
+class PostgresConnection:
+    """Wrapper to make SQLAlchemy connection work like sqlite3 connection"""
+    def __init__(self, raw_connection):
+        self.raw_connection = raw_connection
+        self._transaction = None
+        self.row_factory = None
+        
+    def cursor(self):
+        """Return a cursor-like object"""
+        return PostgresCursor(self.raw_connection)
+    
+    def commit(self):
+        """Commit transaction"""
+        try:
+            self.raw_connection.commit()
+        except:
+            pass
+    
+    def rollback(self):
+        """Rollback transaction"""
+        try:
+            self.raw_connection.rollback()
+        except:
+            pass
+    
+    def close(self):
+        """Close connection"""
+        try:
+            self.raw_connection.close()
+        except:
+            pass
+    
+    def execute(self, query, params=None):
+        """Direct execute for compatibility"""
+        if params:
+            return self.raw_connection.execute(sql_text(query), params)
+        return self.raw_connection.execute(sql_text(query))
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type:
+            self.rollback()
+        self.close()
+
+# ==============================================================================
 def get_pg_conn_url():
-    host = st.secrets["PGHOST"]
-    db = st.secrets["PGDATABASE"]
-    user = st.secrets["PGUSER"]
-    pwd = st.secrets["PGPASSWORD"]
-    port = st.secrets.get("PGPORT", "5432")
-    sslmode = st.secrets.get("PGSSLMODE", "require")
-    return f"postgresql+psycopg://{user}:{pwd}@{host}:{port}/{db}?sslmode={sslmode}"
+    """Get PostgreSQL connection URL from Streamlit secrets"""
+    # Method 1: Try full connection string first (recommended for Neon)
+    if "DATABASE_URL" in st.secrets:
+        url = st.secrets["DATABASE_URL"]
+        # Ensure it uses the right driver
+        if url.startswith("postgresql://"):
+            url = url.replace("postgresql://", "postgresql+psycopg://", 1)
+        elif url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql+psycopg://", 1)
+        return url
+    
+    # Method 2: Build from individual components
+    try:
+        host = st.secrets["PGHOST"]
+        db = st.secrets["PGDATABASE"]
+        user = st.secrets["PGUSER"]
+        pwd = st.secrets["PGPASSWORD"]
+        port = st.secrets.get("PGPORT", "5432")
+        sslmode = st.secrets.get("PGSSLMODE", "require")
+        return f"postgresql+psycopg://{user}:{pwd}@{host}:{port}/{db}?sslmode={sslmode}"
+    except KeyError as e:
+        st.error(f"⚠️ Database secret missing: {e}. Please configure DATABASE_URL in Streamlit secrets.")
+        st.stop()
+        return ""
 
 _engine: Engine | None = None
 
@@ -75,35 +207,13 @@ def get_db_engine() -> Engine:
     return _engine
 
 def get_db_connection():
-    # Returns a SQLAlchemy connection compatible with pandas read_sql functions
-    return get_db_engine().connect()
+    """Returns a connection that works with both SQLite-style and SQLAlchemy code"""
+    raw_conn = get_db_engine().connect()
+    return PostgresConnection(raw_conn)
 
-# -------------------------
-# DB connection helper
-# -------------------------
-def get_db_connection() -> sqlite3.Connection:
-    try:
-        conn = sqlite3.connect(
-            DB_FILE,
-            detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
-            check_same_thread=False,
-        )
-    except Exception as e:
-        st.error(f"Failed to open SQLite DB at: {DB_FILE}\nError: {e}")
-        raise
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA foreign_keys = ON;")
-    except Exception:
-        pass
-    return conn
-
-# Enable WAL mode once at startup (safe if called multiple times)
-try:
-    with get_db_connection() as _c:
-        _c.execute("PRAGMA journal_mode=WAL;")
-except Exception as e:
-    st.warning(f"WAL enable failed (non-fatal): {e}")
+# ----
+# Auth and user helpers
+# ----
 
 def close_all_db_connections():
     # No-op now; kept for compatibility
@@ -224,7 +334,7 @@ def get_user_pages():
 def init_users_db():
     conn = get_db_connection()
     try:
-        conn.execute(text("""
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id SERIAL PRIMARY KEY,
                 username TEXT UNIQUE NOT NULL,
@@ -237,8 +347,8 @@ def init_users_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 last_login TIMESTAMP
             )
-        """))
-        conn.execute(text("""
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS session_logs (
                 log_id SERIAL PRIMARY KEY,
                 user_id INTEGER,
@@ -247,19 +357,19 @@ def init_users_db():
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 ip_address TEXT
             )
-        """))
+        """)
         # Ensure allowed_pages column (handled above, provided for idempotency)
         # Seed admin only if no users
-        cnt = conn.execute(text("SELECT COUNT(*) FROM users")).scalar()
+        cnt = conn.execute("SELECT COUNT(*) FROM users").scalar()
         if cnt == 0:
             import hashlib, json
             default_password = "admin123"
             password_hash = hashlib.sha256(default_password.encode()).hexdigest()
             all_pages = json.dumps(ALL_PAGES)
-            conn.execute(text("""
+            conn.execute("""
                 INSERT INTO users (username, password_hash, full_name, role, allowed_pages, is_active)
                 VALUES (:u, :ph, :fn, :role, :ap, 1)
-            """), {"u": "admin", "ph": password_hash, "fn": "System Administrator", "role": "admin", "ap": all_pages})
+            """, {"u": "admin", "ph": password_hash, "fn": "System Administrator", "role": "admin", "ap": all_pages})
     finally:
         conn.close()
 
@@ -582,19 +692,19 @@ def remove_attachment_from_expense(expense_id, attachment_index):
 def ensure_expense_categories_table():
     conn = get_db_connection()
     try:
-        conn.execute(text("""
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS expense_categories (
                 category_id SERIAL PRIMARY KEY,
                 name TEXT UNIQUE NOT NULL,
                 schema_json TEXT NOT NULL,
                 default_apply_mode TEXT NOT NULL
             )
-        """))
+        """)
         # ensure expenses table has metadata and apply_mode columns
         for alter in ("ALTER TABLE expenses ADD COLUMN metadata TEXT",
                       "ALTER TABLE expenses ADD COLUMN apply_mode TEXT"):
             try:
-                conn.execute(text(alter))
+                conn.execute(alter))
             except SQLAlchemyError:
                 pass
     finally:
@@ -667,7 +777,7 @@ def ensure_expenses_attachments():
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        cur.execute("PRAGMA table_info(expenses)")
+        # PostgreSQL: PRAGMA not needed
         columns = [row[1] for row in cur.fetchall()]
         if "attachments" not in columns:
             cur.execute("ALTER TABLE expenses ADD COLUMN attachments TEXT")
@@ -687,7 +797,7 @@ def init_database():
     conn = get_db_connection()
     try:
         # trucks
-        conn.execute(text('''
+        conn.execute('''
         CREATE TABLE IF NOT EXISTS trucks (
             truck_id SERIAL PRIMARY KEY,
             number TEXT UNIQUE,
@@ -704,7 +814,7 @@ def init_database():
         )
         '''))
         # trailers
-        conn.execute(text('''
+        conn.execute('''
         CREATE TABLE IF NOT EXISTS trailers (
             trailer_id SERIAL PRIMARY KEY,
             number TEXT UNIQUE,
@@ -719,7 +829,7 @@ def init_database():
         )
         '''))
         # drivers
-        conn.execute(text('''
+        conn.execute('''
         CREATE TABLE IF NOT EXISTS drivers (
             driver_id SERIAL PRIMARY KEY,
             name TEXT NOT NULL,
@@ -732,7 +842,7 @@ def init_database():
         )
         '''))
         # expenses
-        conn.execute(text('''
+        conn.execute('''
         CREATE TABLE IF NOT EXISTS expenses (
             expense_id SERIAL PRIMARY KEY,
             date DATE NOT NULL,
@@ -746,7 +856,7 @@ def init_database():
         )
         '''))
         # income
-        conn.execute(text('''
+        conn.execute('''
         CREATE TABLE IF NOT EXISTS income (
             income_id SERIAL PRIMARY KEY,
             date DATE NOT NULL,
@@ -781,7 +891,7 @@ def init_database():
             "ALTER TABLE income ADD COLUMN delivery_full_address TEXT"
         ]:
             try:
-                conn.execute(text(alter_sql))
+                conn.execute(alter_sql))
             except SQLAlchemyError:
                 pass
     finally:
@@ -789,7 +899,7 @@ def init_database():
 
     try:
         with get_db_connection() as c:
-            v = c.execute(text("SELECT version()")).scalar()
+            v = c.execute("SELECT version()").scalar()
         st.success("Connected to Postgres")
         st.caption(v)
     except Exception as e:
@@ -827,7 +937,7 @@ def ensure_truck_and_trailer_extra_columns():
     # Also ensure dispatcher link table if your query uses it
     cur.execute("""
         CREATE TABLE IF NOT EXISTS truck_dispatcher_link (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             truck_id INTEGER NOT NULL,
             dispatcher_id INTEGER NOT NULL,
             start_date DATE NOT NULL DEFAULT (CURRENT_DATE),
@@ -922,7 +1032,7 @@ ensure_expenses_fuel_columns()
 def init_history_tables():
     conn = get_db_connection()
     try:
-        conn.execute(text('''
+        conn.execute('''
         CREATE TABLE IF NOT EXISTS loans_history (
             id SERIAL PRIMARY KEY,
             entity_type TEXT NOT NULL,
@@ -934,7 +1044,7 @@ def init_history_tables():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         '''))
-        conn.execute(text('''
+        conn.execute('''
         CREATE TABLE IF NOT EXISTS trailer_truck_history (
             id SERIAL PRIMARY KEY,
             trailer_id INTEGER NOT NULL,
@@ -947,7 +1057,7 @@ def init_history_tables():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         '''))
-        conn.execute(text('''
+        conn.execute('''
         CREATE TABLE IF NOT EXISTS driver_assignment_history (
             id SERIAL PRIMARY KEY,
             driver_id INTEGER NOT NULL,
@@ -967,7 +1077,7 @@ def migrate_trailer_history_add_truck_id(conn):
     Ensures trailer_truck_history has a truck_id column, backfills it, and adds indexes.
     """
     cur = conn.cursor()
-    cur.execute("PRAGMA table_info(trailer_truck_history);")
+    # PostgreSQL: PRAGMA not needed
     cols = [r[1] for r in cur.fetchall()]
     if "truck_id" not in cols:
         cur.execute("ALTER TABLE trailer_truck_history ADD COLUMN truck_id INTEGER;")
@@ -1009,7 +1119,7 @@ ensure_expenses_attachments()
 def ensure_dispatcher_tables():
     conn = get_db_connection()
     try:
-        conn.execute(text("""
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS dispatchers (
                 dispatcher_id SERIAL PRIMARY KEY,
                 name TEXT NOT NULL UNIQUE,
@@ -1018,25 +1128,25 @@ def ensure_dispatcher_tables():
                 notes TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-        """))
-        conn.execute(text("""
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS dispatcher_trucks (
                 dispatcher_id INTEGER NOT NULL,
                 truck_id INTEGER NOT NULL,
                 PRIMARY KEY (dispatcher_id, truck_id)
             )
-        """))
+        """)
     finally:
         conn.close()
 
 def ensure_dispatcher_truck_link(dispatcher_id: int, truck_id: int):
     with get_db_connection() as conn:
         try:
-            conn.execute(text("""
+            conn.execute("""
                 INSERT INTO dispatcher_trucks (dispatcher_id, truck_id)
                 VALUES (:dispatcher_id, :truck_id)
                 ON CONFLICT (dispatcher_id, truck_id) DO NOTHING
-            """), {"dispatcher_id": dispatcher_id, "truck_id": truck_id})
+            """, {"dispatcher_id": dispatcher_id, "truck_id": truck_id})
         except SQLAlchemyError:
             pass
 
@@ -1046,8 +1156,8 @@ ensure_truck_dispatcher_link()
 def add_dispatcher(name, phone=None, email=None, notes=None):
     conn = get_db_connection()
     cur = conn.cursor()
-    conn.execute(text("INSERT INTO dispatchers (name, phone, email, notes) VALUES (:name, :phone, :email, :notes)"),
-                {"name": name.strip(), "phone": phone, "email": email, "notes": notes})
+    conn.execute("INSERT INTO dispatchers (name, phone, email, notes) VALUES (?, ?, ?, ?)",
+                (name.strip(), phone, email, notes))
     conn.commit()
     dispatcher_id = cur.lastrowid
     conn.close()
@@ -1056,23 +1166,23 @@ def add_dispatcher(name, phone=None, email=None, notes=None):
 def update_dispatcher(dispatcher_id, name, phone=None, email=None, notes=None):
     conn = get_db_connection()
     cur = conn.cursor()
-    conn.execute(text("UPDATE dispatchers SET name=:name, phone=:phone, email=:email, notes=:notes WHERE dispatcher_id=:id"),
-                {"name": name.strip(), "phone": phone, "email": email, "notes": notes, "id": dispatcher_id})
+    conn.execute("UPDATE dispatchers SET name=?, phone=?, email=?, notes=? WHERE dispatcher_id=?",
+                (name.strip(), phone, email, notes, dispatcher_id))
     conn.commit()
     conn.close()
 
 def delete_dispatcher(dispatcher_id):
     conn = get_db_connection()
     cur = conn.cursor()
-    conn.execute(text("DELETE FROM dispatcher_trucks WHERE dispatcher_id=:id"), {"id": dispatcher_id})
-    conn.execute(text("DELETE FROM dispatchers WHERE dispatcher_id=:id"), {"id": dispatcher_id})
+    conn.execute("DELETE FROM dispatcher_trucks WHERE dispatcher_id=?", (dispatcher_id,))
+    conn.execute("DELETE FROM dispatchers WHERE dispatcher_id=?", (dispatcher_id,))
     conn.commit()
     conn.close()
 
 def get_all_dispatchers():
     conn = get_db_connection()
     cur = conn.cursor()
-    conn.execute(text("SELECT dispatcher_id, name, phone, email, notes, created_at FROM dispatchers ORDER BY name"))
+    conn.execute("SELECT dispatcher_id, name, phone, email, notes, created_at FROM dispatchers ORDER BY name")
     rows = cur.fetchall()
     conn.close()
     return [{"dispatcher_id": r[0], "name": r[1], "phone": r[2], "email": r[3], "notes": r[4], "created_at": r[5]} for r in rows]
@@ -1080,7 +1190,7 @@ def get_all_dispatchers():
 def get_trucks_for_dispatcher(dispatcher_id):
     conn = get_db_connection()
     cur = conn.cursor()
-    conn.execute(text("SELECT truck_id FROM dispatcher_trucks WHERE dispatcher_id = :id"), {"id": dispatcher_id})
+    conn.execute("SELECT truck_id FROM dispatcher_trucks WHERE dispatcher_id = ?", (dispatcher_id,))
     rows = cur.fetchall()
     conn.close()
     return [r[0] for r in rows]
@@ -1088,7 +1198,7 @@ def get_trucks_for_dispatcher(dispatcher_id):
 def assign_trucks_to_dispatcher(dispatcher_id, truck_id_list):
     conn = get_db_connection()
     cur = conn.cursor()
-    conn.execute(text("DELETE FROM dispatcher_trucks WHERE dispatcher_id = :id"), {"id": dispatcher_id})
+    conn.execute("DELETE FROM dispatcher_trucks WHERE dispatcher_id = ?", (dispatcher_id,))
     for tid in set([int(t) for t in truck_id_list if t is not None]):
         cur.execute("INSERT INTO dispatcher_trucks (dispatcher_id, truck_id) VALUES (?, ?)", (dispatcher_id, tid))
     conn.commit()
@@ -1101,11 +1211,11 @@ def seed_default_dispatcher():
     # Ensure 'name' is UNIQUE in your dispatchers table definition
     with get_db_connection() as conn:
         try:
-            conn.execute(text("""
+            conn.execute("""
                 INSERT INTO dispatchers (name, phone, email, notes)
                 VALUES (:name, :phone, :email, :notes)
                 ON CONFLICT (name) DO NOTHING
-            """), {
+            """, {
                 "name": "Default Dispatcher",
                 "phone": None,
                 "email": None,
@@ -1137,15 +1247,15 @@ def safe_delete_all_rows(table_name: str):
     conn = get_db_connection()
     try:
         cur = conn.cursor()
-        conn.execute(text("PRAGMA foreign_keys = OFF;"))
-        conn.execute(text(f"DELETE FROM {table_name};"))
+        conn.execute("PRAGMA foreign_keys = OFF;")
+        conn.execute(f"DELETE FROM {table_name};")
         conn.commit()
     except Exception:
         conn.rollback()
         raise
     finally:
         try:
-            cur.execute("PRAGMA foreign_keys = ON;")
+            # PostgreSQL: PRAGMA not needed
         except Exception:
             pass
         conn.close()
@@ -1158,17 +1268,17 @@ def safe_delete_one(table_name: str, key_col: str, key_val):
     try:
         cur = conn.cursor()
         try:
-            conn.execute(text(f"DELETE FROM {table_name} WHERE {key_col} = ?"), (key_val,))
+            conn.execute(f"DELETE FROM {table_name} WHERE {key_col} = ?;", (key_val,))
         except Exception:
-            conn.execute(text("PRAGMA foreign_keys = OFF;"))
-            conn.execute(text(f"DELETE FROM {table_name} WHERE {key_col} = ?"), (key_val,))
+            conn.execute("PRAGMA foreign_keys = OFF;")
+            conn.execute(f"DELETE FROM {table_name} WHERE {key_col} = ?;", (key_val,))
         conn.commit()
     except Exception:
         conn.rollback()
         raise
     finally:
         try:
-            conn.execute(text("PRAGMA foreign_keys = ON;"))
+            conn.execute("PRAGMA foreign_keys = ON;")
         except Exception:
             pass
         conn.close()
@@ -1394,19 +1504,19 @@ def record_driver_assignment(driver_id: int, truck_id: int=None, trailer_id: int
 # -------------------------
 def get_trucks():
     conn = get_db_connection()
-    df = pd.read_sql_query("SELECT * FROM trucks ORDER BY number", conn)
+    df = pd.read_sql_query("SELECT * FROM trucks ORDER BY number", conn.raw_connection if hasattr(conn, "raw_connection") else conn)
     conn.close()
     return df
 
 def get_trailers():
     conn = get_db_connection()
-    df = pd.read_sql_query("SELECT * FROM trailers ORDER BY number", conn)
+    df = pd.read_sql_query("SELECT * FROM trailers ORDER BY number", conn.raw_connection if hasattr(conn, "raw_connection") else conn)
     conn.close()
     return df
 
 def get_drivers():
     conn = get_db_connection()
-    df = pd.read_sql_query("SELECT * FROM drivers ORDER BY name", conn)
+    df = pd.read_sql_query("SELECT * FROM drivers ORDER BY name", conn.raw_connection if hasattr(conn, "raw_connection") else conn)
     conn.close()
     return df
 
@@ -1485,7 +1595,7 @@ def safe_read_sql(query, conn, params=None):
     """
     try:
         if params is None:
-            return pd.read_sql_query(query, conn)
+            return pd.read_sql_query(query, conn.raw_connection if hasattr(conn, "raw_connection") else conn)
         else:
             return pd.read_sql_query(query, conn, params=params)
     except Exception as e:
@@ -1775,7 +1885,7 @@ elif page == "Trucks":
                    ON tr.truck_id = t.truck_id
             ORDER BY t.truck_id DESC;
             """
-            df = pd.read_sql_query(sql, conn)
+            df = pd.read_sql_query(sql, conn.raw_connection if hasattr(conn, "raw_connection") else conn)
             return df
         except Exception as e:
             import traceback
@@ -2724,7 +2834,7 @@ elif page == "Expenses":
             if cat_name == "Fuel":
                 ad_gallons = st.number_input("Gallons", min_value=0.0, value=0.0, step=0.1)
             
-            ad_apply = st.selectbox("Apply mode", ["individual", "divide", "exclude"], index=["individual", "divide", "exclude"].index(cat.get("default_apply_mode", "individual")))
+            ad_apply = st.selectbox("Apply mode", ["individual", "divide", "exclude"], index=["individual", "divide", "exclude"].index(cat.get("default_apply_mode", "individual")
 
             # Divide state keys
             sess_key_all = f"divide_all_trucks__{cat_name}"
@@ -3114,7 +3224,7 @@ elif page == "Expenses":
                         ed_truck_id = None if ed_truck_label == "[None]" else truck_id_map.get(ed_truck_label)
                         
                         ed_apply = st.selectbox("Apply mode", ["individual", "divide", "exclude"],
-                                               index=["individual", "divide", "exclude"].index(row.get("apply_mode", "individual")))
+                                               index=["individual", "divide", "exclude"].index(row.get("apply_mode", "individual")
 
                         # Metadata
                         cat_obj = category_by_name.get(ed_category)
@@ -5226,7 +5336,7 @@ elif page == "Settings":
             try:
                 test_conn = sqlite3.connect(live_db)
                 cur = test_conn.cursor()
-                cur.execute("PRAGMA integrity_check;")
+                # PostgreSQL: PRAGMA not needed
                 result = cur.fetchone()
                 cur.close()
                 test_conn.close()
@@ -5545,7 +5655,7 @@ elif page == "👥 User Management":
                 SELECT * FROM session_logs
                 ORDER BY timestamp DESC
                 LIMIT 100
-            """, conn)
+            """, conn.raw_connection if hasattr(conn, "raw_connection") else conn)
         else:
             logs_df = pd.read_sql_query("""
                 SELECT * FROM session_logs
