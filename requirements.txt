@@ -1,25 +1,28 @@
-# Core Framework
+# Core Streamlit
 streamlit>=1.28.0
 
 # Database
 sqlalchemy>=2.0.0
-psycopg2-binary>=2.9.9
+psycopg[binary]>=3.1.0  # PostgreSQL driver (binary version for easier deployment)
+# Alternative if above doesn't work: psycopg2-binary>=2.9.9
 
-# Data Processing
+# Data processing
 pandas>=2.0.0
 numpy>=1.24.0
 
 # Visualization
-plotly>=5.17.0
+plotly>=5.14.0
 
-# HTTP Requests
+# Excel export
+xlsxwriter>=3.1.0
+openpyxl>=3.1.0
+
+# PDF generation (optional - if you use PDF exports)
+# pdfkit>=1.0.0
+# wkhtmltopdf installation may be required
+
+# HTTP requests (for OpenRouteService API)
 requests>=2.31.0
 
-# Excel Export
-xlsxwriter>=3.1.9
-
-# PDF Export (optional but used in code)
-pdfkit>=1.0.0
-
-# Geolocation (used for geocoding addresses)
-geopy>=2.4.0
+# Date/time utilities
+python-dateutil>=2.8.2
