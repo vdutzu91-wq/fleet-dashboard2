@@ -19,7 +19,7 @@ requests>=2.31.0
 xlsxwriter>=3.1.9
 
 # PDF Export (optional but used in code)
-pdfkit>=1.0.0
+openpyxl
 
 # Geolocation (used for geocoding addresses)
 geopy>=2.4.0
