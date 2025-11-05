@@ -812,7 +812,7 @@ def init_database():
             loan_amount REAL DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-        '''))
+        ''')
         # trailers
         conn.execute('''
         CREATE TABLE IF NOT EXISTS trailers (
@@ -827,7 +827,7 @@ def init_database():
             truck_id INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-        '''))
+        ''')
         # drivers
         conn.execute('''
         CREATE TABLE IF NOT EXISTS drivers (
@@ -840,7 +840,7 @@ def init_database():
             status TEXT DEFAULT 'Active',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-        '''))
+        ''')
         # expenses
         conn.execute('''
         CREATE TABLE IF NOT EXISTS expenses (
@@ -854,7 +854,7 @@ def init_database():
             service_type TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-        '''))
+        ''')
         # income
         conn.execute('''
         CREATE TABLE IF NOT EXISTS income (
@@ -874,7 +874,7 @@ def init_database():
             rpm REAL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-        '''))
+        ''')
         # extra income columns (idempotent)
         for alter_sql in [
             "ALTER TABLE income ADD COLUMN driver_name TEXT",
@@ -891,7 +891,7 @@ def init_database():
             "ALTER TABLE income ADD COLUMN delivery_full_address TEXT"
         ]:
             try:
-                conn.execute(alter_sql))
+                conn.execute(alter_sql)
             except SQLAlchemyError:
                 pass
     finally:
