@@ -13,10 +13,16 @@ import tempfile
 import traceback
 import errno
 import json
-import pdfkit
-import tempfile
 import numpy as np
 import time
+
+# ReportLab imports for PDF generation
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter, A4, landscape
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.lib.enums import TA_CENTER
 
 # Simple role display names
 ROLE_NAMES = {
@@ -29,10 +35,6 @@ ROLE_NAMES = {
 
 from math import isfinite
 from datetime import datetime, date
-pdfkit_config = pdfkit.configuration(
-    wkhtmltopdf=r"C:\Program Files\wkhtmltopdf\bin\wkhtmltopdf.exe"
-)
-from datetime import date # already present above, ok
 
 COMPANY_START = date(2019, 1, 1)
 
@@ -159,58 +161,139 @@ def export_to_excel(df, filename_prefix="report"):
     )
 
 def export_to_pdf_table(df, title="Report"):
-    """Exports a DataFrame to PDF using pdfkit (wkhtmltopdf backend)."""
+    """Exports a DataFrame to PDF using reportlab (pure Python, no external dependencies)."""
     if df is None or df.empty:
         st.warning("No data available to export.")
         return
 
-    html = f"""
-    <html>
-      <head>
-        <meta charset="utf-8">
-        <title>{title}</title>
-        <style>
-          body {{
-            font-family: Arial, sans-serif;
-            margin: 25px;
-          }}
-          h2 {{
-            text-align: center;
-            margin-bottom: 20px;
-          }}
-          table {{
-            border-collapse: collapse;
-            width: 100%;
-            font-size: 13px;
-          }}
-          th, td {{
-            border: 1px solid #ccc;
-            padding: 6px 10px;
-            text-align: center;
-          }}
-          th {{
-            background-color: #f2f2f2;
-            font-weight: bold;
-          }}
-        </style>
-      </head>
-      <body>
-        <h2>{title}</h2>
-        {df.to_html(index=False, justify="center")}
-      </body>
-    </html>
-    """
-
-    # Create PDF in a temporary file
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmpfile:
-        pdfkit.from_string(html, tmpfile.name, configuration=pdfkit_config)
-        tmpfile.seek(0)
+    # Create a BytesIO buffer for the PDF
+    buffer = io.BytesIO()
+    
+    # Determine page size and orientation based on number of columns
+    num_cols = len(df.columns)
+    if num_cols > 8:
+        page_size = landscape(A4)
+    else:
+        page_size = A4
+    
+    # Create the PDF document
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=page_size,
+        rightMargin=30,
+        leftMargin=30,
+        topMargin=50,
+        bottomMargin=30
+    )
+    
+    # Container for the 'Flowable' objects
+    elements = []
+    
+    # Define styles
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=16,
+        textColor=colors.HexColor('#1f77b4'),
+        spaceAfter=20,
+        alignment=TA_CENTER
+    )
+    
+    # Add title
+    title_para = Paragraph(title, title_style)
+    elements.append(title_para)
+    elements.append(Spacer(1, 12))
+    
+    # Prepare table data
+    # Convert all data to strings to avoid any type issues
+    table_data = []
+    
+    # Add header row
+    header_row = [str(col) for col in df.columns]
+    table_data.append(header_row)
+    
+    # Add data rows
+    for idx, row in df.iterrows():
+        row_data = []
+        for val in row:
+            # Handle None, NaN, and other special values
+            if pd.isna(val):
+                row_data.append('')
+            elif isinstance(val, (int, float)):
+                # Format numbers nicely
+                if isinstance(val, float) and val != int(val):
+                    row_data.append(f'{val:.2f}')
+                else:
+                    row_data.append(str(int(val)))
+            else:
+                row_data.append(str(val))
+        table_data.append(row_data)
+    
+    # Calculate column widths based on page size
+    available_width = page_size[0] - 60  # Subtract margins
+    col_width = available_width / num_cols
+    
+    # Create the table
+    table = Table(table_data, colWidths=[col_width] * num_cols)
+    
+    # Style the table
+    table_style = TableStyle([
+        # Header row styling
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#f2f2f2')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 10),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+        
+        # Data rows styling
+        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+        ('FONTSIZE', (0, 1), (-1, -1), 8),
+        ('ALIGN', (0, 1), (-1, -1), 'CENTER'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        
+        # Borders
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+        ('BOX', (0, 0), (-1, -1), 1, colors.black),
+        
+        # Alternating row colors for better readability
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f9f9f9')]),
+    ])
+    
+    table.setStyle(table_style)
+    elements.append(table)
+    
+    # Add footer with timestamp
+    elements.append(Spacer(1, 20))
+    footer_style = ParagraphStyle(
+        'Footer',
+        parent=styles['Normal'],
+        fontSize=8,
+        textColor=colors.grey,
+        alignment=TA_CENTER
+    )
+    footer_text = f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    footer_para = Paragraph(footer_text, footer_style)
+    elements.append(footer_para)
+    
+    # Build PDF
+    try:
+        doc.build(elements)
+        buffer.seek(0)
+        
+        # Create download button
         st.download_button(
             label=f"📄 Download {title}.pdf",
-            data=tmpfile.read(),
+            data=buffer.getvalue(),
             file_name=f"{title}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
             mime="application/pdf",
         )
+    except Exception as e:
+        st.error(f"Error generating PDF: {str(e)}")
+        st.error("Please try exporting to Excel instead.")
+    finally:
+        buffer.close()
 
 def export_buttons(df, base_name="report", title="Report"):
     """Render Excel + PDF export buttons side by side."""
