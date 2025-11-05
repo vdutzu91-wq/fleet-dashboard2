@@ -13,51 +13,16 @@ import tempfile
 import traceback
 import errno
 import json
-import tempfile
 import numpy as np
 import time
 
-if st.button("Test PostgreSQL Connection"):
-    from db_helper import get_db_connection
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT version();")
-        version = cur.fetchone()[0]
-        st.success(f"✅ Connected! {version}")
-        cur.close()
-        conn.close()
-    except Exception as e:
-        st.error(f"❌ Failed: {e}")
-
-# Optional PDF generation with pdfkit (requires wkhtmltopdf)
-# Streamlit Cloud doesn't have wkhtmltopdf, so we make this optional
-try:
-    import pdfkit
-    # Try to detect wkhtmltopdf location based on OS
-    import platform
-    import shutil
-    
-    # Try to find wkhtmltopdf automatically
-    wkhtmltopdf_path = shutil.which('wkhtmltopdf')
-    
-    if wkhtmltopdf_path:
-        pdfkit_config = pdfkit.configuration(wkhtmltopdf=wkhtmltopdf_path)
-    elif platform.system() == 'Windows':
-        # Fallback to common Windows path
-        default_path = r"C:\Program Files\wkhtmltopdf\bin\wkhtmltopdf.exe"
-        if os.path.exists(default_path):
-            pdfkit_config = pdfkit.configuration(wkhtmltopdf=default_path)
-        else:
-            pdfkit_config = None
-    else:
-        pdfkit_config = None
-    
-    PDFKIT_AVAILABLE = pdfkit_config is not None
-except (ImportError, OSError):
-    pdfkit = None
-    pdfkit_config = None
-    PDFKIT_AVAILABLE = False
+# ReportLab imports for PDF generation
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter, A4, landscape
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.lib.enums import TA_CENTER
 
 # Simple role display names
 ROLE_NAMES = {
@@ -70,7 +35,6 @@ ROLE_NAMES = {
 
 from math import isfinite
 from datetime import datetime, date
-from datetime import date # already present above, ok
 
 COMPANY_START = date(2019, 1, 1)
 
@@ -197,68 +161,139 @@ def export_to_excel(df, filename_prefix="report"):
     )
 
 def export_to_pdf_table(df, title="Report"):
-    """Exports a DataFrame to PDF using pdfkit (wkhtmltopdf backend) if available."""
+    """Exports a DataFrame to PDF using reportlab (pure Python, no external dependencies)."""
     if df is None or df.empty:
         st.warning("No data available to export.")
         return
+
+    # Create a BytesIO buffer for the PDF
+    buffer = io.BytesIO()
     
-    # Check if pdfkit is available
-    if not PDFKIT_AVAILABLE:
-        st.warning("⚠️ PDF export requires wkhtmltopdf to be installed. Excel export is available instead.")
-        st.info("💡 On Streamlit Cloud, PDF export is not supported. Please use Excel export.")
-        return
-
-    html = f"""
-    <html>
-      <head>
-        <meta charset="utf-8">
-        <title>{title}</title>
-        <style>
-          body {{
-            font-family: Arial, sans-serif;
-            margin: 25px;
-          }}
-          h2 {{
-            text-align: center;
-            margin-bottom: 20px;
-          }}
-          table {{
-            border-collapse: collapse;
-            width: 100%;
-            font-size: 13px;
-          }}
-          th, td {{
-            border: 1px solid #ccc;
-            padding: 6px 10px;
-            text-align: center;
-          }}
-          th {{
-            background-color: #f2f2f2;
-            font-weight: bold;
-          }}
-        </style>
-      </head>
-      <body>
-        <h2>{title}</h2>
-        {df.to_html(index=False, justify="center")}
-      </body>
-    </html>
-    """
-
+    # Determine page size and orientation based on number of columns
+    num_cols = len(df.columns)
+    if num_cols > 8:
+        page_size = landscape(A4)
+    else:
+        page_size = A4
+    
+    # Create the PDF document
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=page_size,
+        rightMargin=30,
+        leftMargin=30,
+        topMargin=50,
+        bottomMargin=30
+    )
+    
+    # Container for the 'Flowable' objects
+    elements = []
+    
+    # Define styles
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=16,
+        textColor=colors.HexColor('#1f77b4'),
+        spaceAfter=20,
+        alignment=TA_CENTER
+    )
+    
+    # Add title
+    title_para = Paragraph(title, title_style)
+    elements.append(title_para)
+    elements.append(Spacer(1, 12))
+    
+    # Prepare table data
+    # Convert all data to strings to avoid any type issues
+    table_data = []
+    
+    # Add header row
+    header_row = [str(col) for col in df.columns]
+    table_data.append(header_row)
+    
+    # Add data rows
+    for idx, row in df.iterrows():
+        row_data = []
+        for val in row:
+            # Handle None, NaN, and other special values
+            if pd.isna(val):
+                row_data.append('')
+            elif isinstance(val, (int, float)):
+                # Format numbers nicely
+                if isinstance(val, float) and val != int(val):
+                    row_data.append(f'{val:.2f}')
+                else:
+                    row_data.append(str(int(val)))
+            else:
+                row_data.append(str(val))
+        table_data.append(row_data)
+    
+    # Calculate column widths based on page size
+    available_width = page_size[0] - 60  # Subtract margins
+    col_width = available_width / num_cols
+    
+    # Create the table
+    table = Table(table_data, colWidths=[col_width] * num_cols)
+    
+    # Style the table
+    table_style = TableStyle([
+        # Header row styling
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#f2f2f2')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 10),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+        
+        # Data rows styling
+        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+        ('FONTSIZE', (0, 1), (-1, -1), 8),
+        ('ALIGN', (0, 1), (-1, -1), 'CENTER'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        
+        # Borders
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+        ('BOX', (0, 0), (-1, -1), 1, colors.black),
+        
+        # Alternating row colors for better readability
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f9f9f9')]),
+    ])
+    
+    table.setStyle(table_style)
+    elements.append(table)
+    
+    # Add footer with timestamp
+    elements.append(Spacer(1, 20))
+    footer_style = ParagraphStyle(
+        'Footer',
+        parent=styles['Normal'],
+        fontSize=8,
+        textColor=colors.grey,
+        alignment=TA_CENTER
+    )
+    footer_text = f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    footer_para = Paragraph(footer_text, footer_style)
+    elements.append(footer_para)
+    
+    # Build PDF
     try:
-        # Create PDF in a temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmpfile:
-            pdfkit.from_string(html, tmpfile.name, configuration=pdfkit_config)
-            tmpfile.seek(0)
-            st.download_button(
-                label=f"📄 Download {title}.pdf",
-                data=tmpfile.read(),
-                file_name=f"{title}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-                mime="application/pdf",
-            )
+        doc.build(elements)
+        buffer.seek(0)
+        
+        # Create download button
+        st.download_button(
+            label=f"📄 Download {title}.pdf",
+            data=buffer.getvalue(),
+            file_name=f"{title}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+            mime="application/pdf",
+        )
     except Exception as e:
-        st.error(f"❌ PDF generation failed: {str(e)}")
-        st.info("💡 Please use Excel export instead.")
+        st.error(f"Error generating PDF: {str(e)}")
+        st.error("Please try exporting to Excel instead.")
+    finally:
+        buffer.close()
 
 def export_buttons(df, base_name="report", title="Report"):
     """Render Excel + PDF export buttons side by side."""
@@ -266,18 +301,11 @@ def export_buttons(df, base_name="report", title="Report"):
         st.info("No data to export.")
         return
 
-    # If PDF is available, show both buttons side by side
-    # If not, just show Excel button
-    if PDFKIT_AVAILABLE:
-        c1, c2 = st.columns(2)
-        with c1:
-            export_to_excel(df, base_name)
-        with c2:
-            export_to_pdf_table(df, title)
-    else:
-        # Only show Excel export when PDF is not available
+    c1, c2 = st.columns(2)
+    with c1:
         export_to_excel(df, base_name)
-        st.caption("💡 PDF export is not available on Streamlit Cloud. Use Excel export instead.")
+    with c2:
+        export_to_pdf_table(df, title)
 
 DB_FILE = 'fleet_management.db'
 
@@ -1063,117 +1091,8 @@ def init_database():
     conn.commit()
     conn.close()
 
-# ----
-# Database Schema Migration Functions
-# ----
-def get_table_columns_for_migration(conn, table_name):
-    """Get list of column names for a table"""
-    try:
-        cur = conn.cursor()
-        cur.execute(f"PRAGMA table_info({table_name})")
-        columns = [row[1] for row in cur.fetchall()]
-        return columns
-    except sqlite3.OperationalError:
-        return []
-
-def add_column_if_missing_migration(conn, table_name, column_name, column_type, default_value=None):
-    """
-    Add a column to a table if it doesn't exist.
-    Returns True if column was added, False if it already existed.
-    Safe to run multiple times (idempotent).
-    """
-    existing_columns = get_table_columns_for_migration(conn, table_name)
-    
-    if column_name in existing_columns:
-        return False
-    
-    # Build ALTER TABLE statement
-    alter_sql = f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"
-    if default_value is not None:
-        alter_sql += f" DEFAULT {default_value}"
-    
-    try:
-        cur = conn.cursor()
-        cur.execute(alter_sql)
-        return True
-    except sqlite3.OperationalError as e:
-        # Column might already exist (race condition or duplicate column error)
-        if "duplicate column" in str(e).lower():
-            return False
-        else:
-            # Re-raise other errors
-            raise
-
-def run_database_migrations():
-    """
-    Run all database schema migrations to add missing columns.
-    This function is idempotent - safe to run multiple times.
-    Fixes schema errors by adding missing columns to tables.
-    """
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-        
-        # Enable foreign keys
-        cur.execute("PRAGMA foreign_keys = ON")
-        
-        migration_log = []
-        
-        # Income table migrations
-        if add_column_if_missing_migration(conn, "income", "pickup_time", "TIME"):
-            migration_log.append("Added income.pickup_time")
-        if add_column_if_missing_migration(conn, "income", "delivery_time", "TIME"):
-            migration_log.append("Added income.delivery_time")
-        
-        # Expenses table migrations  
-        if add_column_if_missing_migration(conn, "expenses", "gallons", "REAL", "0"):
-            migration_log.append("Added expenses.gallons")
-        
-        # Trucks table migrations
-        if add_column_if_missing_migration(conn, "trucks", "loan_start_date", "DATE"):
-            migration_log.append("Added trucks.loan_start_date")
-        if add_column_if_missing_migration(conn, "trucks", "loan_term_months", "INTEGER", "0"):
-            migration_log.append("Added trucks.loan_term_months")
-        # dispatcher_id might already be added by ensure_truck_dispatcher_link(), but safe to check
-        if add_column_if_missing_migration(conn, "trucks", "dispatcher_id", "INTEGER"):
-            migration_log.append("Added trucks.dispatcher_id")
-        
-        # Trailers table migrations
-        if add_column_if_missing_migration(conn, "trailers", "loan_start_date", "DATE"):
-            migration_log.append("Added trailers.loan_start_date")
-        if add_column_if_missing_migration(conn, "trailers", "loan_term_months", "INTEGER", "0"):
-            migration_log.append("Added trailers.loan_term_months")
-        
-        # Commit all changes
-        conn.commit()
-        conn.close()
-        
-        # Only log if changes were made (to avoid spam in production)
-        if migration_log:
-            print("=" * 60)
-            print(f"Database migration completed: {len(migration_log)} column(s) added")
-            for log_entry in migration_log:
-                print(f"  ✓ {log_entry}")
-            print("=" * 60)
-        
-        return True
-        
-    except Exception as e:
-        print(f"Database migration error: {e}")
-        try:
-            conn.rollback()
-            conn.close()
-        except:
-            pass
-        return False
-
 # call initial DB creation
 init_database()
-
-# Run database migrations to add missing columns
-# This is safe to run on every startup - it only adds columns that don't exist
-run_database_migrations()
 
 # -------------------------
 # DB connection helper (must exist before migrations that use it)
@@ -6230,13 +6149,20 @@ elif page == "Reports":
                     conn_tmp,
                     params=[start_date.isoformat(), end_date.isoformat()],
                 )
-                income_df["truck_number"] = income_df["truck_id"].map(dict(zip(trucks_df.truck_id, trucks_df.number)))
-                income_df["dispatcher_id"] = None
-                income_df["dispatcher_name"] = None
+                if income_df is not None and not income_df.empty:
+                    income_df["truck_number"] = income_df["truck_id"].map(dict(zip(trucks_df.truck_id, trucks_df.number)))
+                    income_df["dispatcher_id"] = None
+                    income_df["dispatcher_name"] = None
+                else:
+                    income_df = pd.DataFrame(columns=["truck_id","truck_number","dispatcher_id","dispatcher_name","total_income"])
         else:
             income_df = pd.DataFrame(columns=["truck_id","truck_number","dispatcher_id","dispatcher_name","total_income"])
     finally:
         conn_tmp.close()
+    
+    # Ensure income_df is not None
+    if income_df is None:
+        income_df = pd.DataFrame(columns=["truck_id","truck_number","dispatcher_id","dispatcher_name","total_income"])
 
     # Expenses per truck and dispatcher by date overlap
     conn_tmp = get_db_connection()
@@ -6271,13 +6197,20 @@ elif page == "Reports":
                     conn_tmp,
                     params=[start_date.isoformat(), end_date.isoformat()],
                 )
-                expense_df["truck_number"] = expense_df["truck_id"].map(dict(zip(trucks_df.truck_id, trucks_df.number)))
-                expense_df["dispatcher_id"] = None
-                expense_df["dispatcher_name"] = None
+                if expense_df is not None and not expense_df.empty:
+                    expense_df["truck_number"] = expense_df["truck_id"].map(dict(zip(trucks_df.truck_id, trucks_df.number)))
+                    expense_df["dispatcher_id"] = None
+                    expense_df["dispatcher_name"] = None
+                else:
+                    expense_df = pd.DataFrame(columns=["truck_id","truck_number","dispatcher_id","dispatcher_name","total_expenses"])
         else:
             expense_df = pd.DataFrame(columns=["truck_id","truck_number","dispatcher_id","dispatcher_name","total_expenses"])
     finally:
         conn_tmp.close()
+    
+    # Ensure expense_df is not None
+    if expense_df is None:
+        expense_df = pd.DataFrame(columns=["truck_id","truck_number","dispatcher_id","dispatcher_name","total_expenses"])
 
     # --------------------------------------------------
     # Accurate (pro-rated) Loans per Truck using History
@@ -6425,21 +6358,41 @@ elif page == "Reports":
     common_keys = ["truck_id","truck_number","dispatcher_id","dispatcher_name"]
     summary = _merge(income_df, expense_df, on=common_keys)
 
+    # Coerce data types in loans_df to ensure compatibility for merging
+    if not loans_df.empty:
+        # Ensure truck_id is integer type
+        loans_df["truck_id"] = pd.to_numeric(loans_df["truck_id"], errors="coerce").fillna(0).astype(int)
+        # Ensure truck_number is string type and handle NaN
+        loans_df["truck_number"] = loans_df["truck_number"].astype(str).replace('nan', '').replace('None', '')
+
     # Loans are truck-level; attach to each dispatcher row for that truck
     if summary is not None and not summary.empty:
-        loans_for_merge = summary[["truck_id","truck_number"]].drop_duplicates().merge(
-            loans_df[["truck_id","truck_number","loan_amount"]], on=["truck_id","truck_number"], how="left"
-        )
-        loans_for_merge = summary[common_keys].drop_duplicates().merge(
-            loans_df[["truck_id","truck_number","loan_amount"]], on=["truck_id","truck_number"], how="left"
-        )
-        summary = _merge(summary, loans_for_merge, on=common_keys)
+        # Coerce data types in summary to match loans_df
+        summary["truck_id"] = pd.to_numeric(summary["truck_id"], errors="coerce").fillna(0).astype(int)
+        summary["truck_number"] = summary["truck_number"].astype(str).replace('nan', '').replace('None', '')
+        
+        # Only merge if loans_df has data
+        if not loans_df.empty:
+            loans_for_merge = summary[common_keys].drop_duplicates().merge(
+                loans_df[["truck_id","truck_number","loan_amount"]], on=["truck_id","truck_number"], how="left"
+            )
+            summary = _merge(summary, loans_for_merge, on=common_keys)
+        else:
+            # No loans data, just add empty loan_amount column
+            summary["loan_amount"] = 0.0
     else:
         # If no summary rows, still make a base from trucks + loans
         summary = trucks_df.rename(columns={"number":"truck_number"})[["truck_id","truck_number"]].copy()
         summary["dispatcher_id"] = None
         summary["dispatcher_name"] = None
-        summary = summary.merge(loans_df[["truck_id","truck_number","loan_amount"]], on=["truck_id","truck_number"], how="left")
+        # Coerce types before merge
+        summary["truck_id"] = pd.to_numeric(summary["truck_id"], errors="coerce").fillna(0).astype(int)
+        summary["truck_number"] = summary["truck_number"].astype(str).replace('nan', '').replace('None', '')
+        
+        if not loans_df.empty:
+            summary = summary.merge(loans_df[["truck_id","truck_number","loan_amount"]], on=["truck_id","truck_number"], how="left")
+        else:
+            summary["loan_amount"] = 0.0
 
     # Fill numeric defaults
     for c in ["total_income","total_expenses","loan_amount"]:
@@ -7268,14 +7221,48 @@ elif page == "Reports":
         df_miles['total_miles'] = df_miles['total_loaded_miles'] + df_miles['total_empty_miles']
 
         # 2) Build your expenses by category, then pivot -> df_pivot
-        # df_expenses_by_cat = <your query here>
-        df_pivot = df_expenses_by_cat.pivot_table(
-            index=['truck_id', 'truck_number'],
-            columns='category',
-            values='category_total',
-            fill_value=0,
-            aggfunc='sum'
-        ).reset_index()
+        conn_expenses = get_db_connection()
+        try:
+            df_expenses_by_cat = safe_read_sql(
+                """
+                SELECT
+                    e.truck_id,
+                    t.number AS truck_number,
+                    e.category,
+                    COALESCE(SUM(e.amount), 0) AS category_total
+                FROM expenses e
+                LEFT JOIN trucks t ON e.truck_id = t.truck_id
+                WHERE e.date >= ? AND e.date <= ?
+                GROUP BY e.truck_id, t.number, e.category
+                """,
+                conn_expenses,
+                params=(cpm_start, cpm_end)
+            )
+        finally:
+            conn_expenses.close()
+        
+        # Handle empty result or None
+        if df_expenses_by_cat is None or df_expenses_by_cat.empty:
+            df_expenses_by_cat = pd.DataFrame(columns=['truck_id', 'truck_number', 'category', 'category_total'])
+        
+        # Coerce data types for safety
+        if not df_expenses_by_cat.empty:
+            df_expenses_by_cat['truck_id'] = pd.to_numeric(df_expenses_by_cat['truck_id'], errors='coerce').fillna(0).astype(int)
+            df_expenses_by_cat['truck_number'] = df_expenses_by_cat['truck_number'].astype(str)
+            df_expenses_by_cat['category_total'] = pd.to_numeric(df_expenses_by_cat['category_total'], errors='coerce').fillna(0.0)
+        
+        # Pivot the expenses by category
+        if not df_expenses_by_cat.empty:
+            df_pivot = df_expenses_by_cat.pivot_table(
+                index=['truck_id', 'truck_number'],
+                columns='category',
+                values='category_total',
+                fill_value=0,
+                aggfunc='sum'
+            ).reset_index()
+        else:
+            # Create empty pivot with required columns
+            df_pivot = pd.DataFrame(columns=['truck_id', 'truck_number'])
 
         # 3) All trucks
         conn_cpm_all = get_db_connection()
