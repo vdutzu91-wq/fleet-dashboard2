@@ -1,5 +1,4 @@
 import streamlit as st
-import sqlite3
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -15,16 +14,15 @@ import errno
 import json
 import numpy as np
 import time
+import mimetypes
+import requests
+from math import isfinite
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
-# ReportLab imports for PDF generation
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import letter, A4, landscape
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch
-from reportlab.lib.enums import TA_CENTER
-
-# Simple role display names
+# -------------------------
+# App constants and roles
+# -------------------------
 ROLE_NAMES = {
     "admin": "Administrator",
     "dispatcher": "Dispatcher",
@@ -33,13 +31,7 @@ ROLE_NAMES = {
     "viewer": "Viewer"
 }
 
-from math import isfinite
-from datetime import datetime, date
-
 COMPANY_START = date(2019, 1, 1)
-
-import hashlib
-import json
 
 # All available pages in your app
 ALL_PAGES = [
@@ -57,6 +49,210 @@ ALL_PAGES = [
     "👥 User Management"
 ]
 
+# -------------------------
+# Postgres connection (Neon via SQLAlchemy)
+# -------------------------
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
+
+
+# ==============================================================================
+# PostgreSQL Compatibility Wrappers
+# ==============================================================================
+# These classes make SQLAlchemy connections work with SQLite-style code
+
+from contextlib import contextmanager
+from sqlalchemy import text as sql_text
+
+class PostgresCursor:
+    """Wrapper to make SQLAlchemy connection work like sqlite3 cursor"""
+    def __init__(self, connection):
+        self.connection = connection
+        self.result = None
+        self.lastrowid = None
+        
+    def execute(self, query, params=None):
+        """Execute query with parameter substitution"""
+        # Convert ? placeholders to :param1, :param2, etc.
+        if params and '?' in query:
+            param_dict = {}
+            parts = query.split('?')
+            new_query = parts[0]
+            for i, part in enumerate(parts[1:]):
+                param_name = f'param{i}'
+                new_query += f':{param_name}' + part
+                param_dict[param_name] = params[i] if i < len(params) else None
+            query = new_query
+            params = param_dict
+        
+        # Wrap in text() if not already
+        if params:
+            self.result = self.connection.execute(sql_text(query), params)
+        else:
+            self.result = self.connection.execute(sql_text(query))
+        
+        # Try to get lastrowid
+        try:
+            if self.result and hasattr(self.result, 'lastrowid'):
+                self.lastrowid = self.result.lastrowid
+            elif self.result and hasattr(self.result, 'inserted_primary_key'):
+                pk = self.result.inserted_primary_key
+                self.lastrowid = pk[0] if pk else None
+        except:
+            pass
+        
+        return self
+    
+    def fetchone(self):
+        """Fetch one result"""
+        if self.result:
+            row = self.result.fetchone()
+            return tuple(row) if row else None
+        return None
+    
+    def fetchall(self):
+        """Fetch all results"""
+        if self.result:
+            return [tuple(row) for row in self.result.fetchall()]
+        return []
+    
+    def close(self):
+        """Close cursor (no-op for our wrapper)"""
+        if self.result:
+            try:
+                self.result.close()
+            except:
+                pass
+
+class PostgresConnection:
+    """Wrapper to make SQLAlchemy connection work like sqlite3 connection"""
+    def __init__(self, raw_connection):
+        self.raw_connection = raw_connection
+        self._transaction = None
+        self.row_factory = None
+        
+    def cursor(self):
+        """Return a cursor-like object"""
+        return PostgresCursor(self.raw_connection)
+    
+    def commit(self):
+        """Commit transaction"""
+        try:
+            self.raw_connection.commit()
+        except:
+            pass
+    
+    def rollback(self):
+        """Rollback transaction"""
+        try:
+            self.raw_connection.rollback()
+        except:
+            pass
+    
+    def close(self):
+        """Close connection"""
+        try:
+            self.raw_connection.close()
+        except:
+            pass
+    
+    def execute(self, query, params=None):
+        """Direct execute for compatibility"""
+        if params:
+            return self.raw_connection.execute(sql_text(query), params)
+        return self.raw_connection.execute(sql_text(query))
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type:
+            self.rollback()
+        self.close()
+
+# ==============================================================================
+def get_pg_conn_url():
+    """Get PostgreSQL connection URL from Streamlit secrets"""
+    # Method 1: Try full connection string first (recommended for Neon)
+    if "DATABASE_URL" in st.secrets:
+        url = st.secrets["DATABASE_URL"]
+        # Ensure it uses the right driver
+        if url.startswith("postgresql://"):
+            url = url.replace("postgresql://", "postgresql+psycopg://", 1)
+        elif url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql+psycopg://", 1)
+        return url
+    
+    # Method 2: Build from individual components
+    try:
+        host = st.secrets["PGHOST"]
+        db = st.secrets["PGDATABASE"]
+        user = st.secrets["PGUSER"]
+        pwd = st.secrets["PGPASSWORD"]
+        port = st.secrets.get("PGPORT", "5432")
+        sslmode = st.secrets.get("PGSSLMODE", "require")
+        return f"postgresql+psycopg://{user}:{pwd}@{host}:{port}/{db}?sslmode={sslmode}"
+    except KeyError as e:
+        st.error(f"⚠️ Database secret missing: {e}. Please configure DATABASE_URL in Streamlit secrets.")
+        st.stop()
+        return ""
+
+_engine: Engine | None = None
+
+def get_db_engine() -> Engine:
+    global _engine
+    if _engine is None:
+        _engine = create_engine(get_pg_conn_url(), pool_pre_ping=True)
+    return _engine
+
+def get_db_connection():
+    """Returns a connection that works with both SQLite-style and SQLAlchemy code"""
+    raw_conn = get_db_engine().connect()
+    return PostgresConnection(raw_conn)
+
+# ----
+# Auth and user helpers
+# ----
+
+def close_all_db_connections():
+    # No-op now; kept for compatibility
+    pass
+
+def close_all_db_connections_if_any():
+    """
+    Close any long-lived/global DB connections your app might keep open.
+    Modify this to close any global variables you use.
+    """
+    try:
+        for name in ('global_conn', 'global_connection', 'db_conn', 'conn'):
+            if name in globals():
+                obj = globals().get(name)
+                if obj:
+                    try:
+                        obj.close()
+                    except Exception:
+                        pass
+                    try:
+                        globals()[name] = None
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    try:
+        if 'engine' in globals() and globals().get('engine'):
+            try:
+                globals()['engine'].dispose()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+# -------------------------
+# Auth and user helpers
+# -------------------------
+import hashlib
+
 def hash_password(password):
     """Hash password using SHA256"""
     return hashlib.sha256(password.encode()).hexdigest()
@@ -69,23 +265,19 @@ def authenticate_user(username, password):
     """Authenticate user and return user data"""
     conn = get_db_connection()
     cur = conn.cursor()
-    
     cur.execute("""
         SELECT user_id, username, password_hash, full_name, email, role, allowed_pages, is_active
         FROM users
         WHERE username = ? AND is_active = 1
     """, (username,))
-    
     user = cur.fetchone()
     conn.close()
-    
     if user and verify_password(password, user[2]):
         # Parse allowed pages from JSON
         try:
             allowed_pages = json.loads(user[6]) if user[6] else []
-        except:
+        except Exception:
             allowed_pages = []
-        
         return {
             "user_id": user[0],
             "username": user[1],
@@ -107,8 +299,9 @@ def log_session_action(user_id, username, action, ip_address=None):
         """, (user_id, username, action, ip_address))
         conn.commit()
         conn.close()
-    except Exception as e:
-        pass  # Silent fail for logging
+    except Exception:
+        # Silent fail for logging
+        pass
 
 def update_last_login(user_id):
     """Update user's last login timestamp"""
@@ -126,33 +319,74 @@ def can_access_page(page_name):
     """Check if current user can access a specific page"""
     if "user" not in st.session_state or st.session_state.user is None:
         return False
-    
-    # Admin can access everything
     if st.session_state.user.get("role") == "admin":
         return True
-    
     return page_name in st.session_state.user.get("allowed_pages", [])
 
 def get_user_pages():
     """Get list of pages current user can access"""
     if "user" not in st.session_state or st.session_state.user is None:
         return []
-    
-    # Admin can access everything
     if st.session_state.user.get("role") == "admin":
         return ALL_PAGES
-    
     return st.session_state.user.get("allowed_pages", [])
 
+def init_users_db():
+    conn = get_db_connection()
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id SERIAL PRIMARY KEY,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                full_name TEXT,
+                email TEXT,
+                role TEXT NOT NULL DEFAULT 'viewer',
+                allowed_pages TEXT,
+                is_active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_login TIMESTAMP
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS session_logs (
+                log_id SERIAL PRIMARY KEY,
+                user_id INTEGER,
+                username TEXT,
+                action TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                ip_address TEXT
+            )
+        """)
+        # Ensure allowed_pages column (handled above, provided for idempotency)
+        # Seed admin only if no users
+        cnt = conn.execute("SELECT COUNT(*) FROM users").scalar()
+        if cnt == 0:
+            import hashlib, json
+            default_password = "admin123"
+            password_hash = hashlib.sha256(default_password.encode()).hexdigest()
+            all_pages = json.dumps(ALL_PAGES)
+            conn.execute("""
+                INSERT INTO users (username, password_hash, full_name, role, allowed_pages, is_active)
+                VALUES (:u, :ph, :fn, :role, :ap, 1)
+            """, {"u": "admin", "ph": password_hash, "fn": "System Administrator", "role": "admin", "ap": all_pages})
+    finally:
+        conn.close()
+
+# Call this in your main initialization
+init_users_db()
+
+# -------------------------
+# Export helpers (Excel + PDF table)
+# -------------------------
 def export_to_excel(df, filename_prefix="report"):
-    """Return an Excel download link for a given dataframe."""
+    """Return an Excel download button for a given dataframe."""
     if df is None or df.empty:
         st.warning("No data available to export.")
         return None
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
         df.to_excel(writer, index=False, sheet_name="Data")
-        writer.close()
     st.download_button(
         label=f"📊 Download {filename_prefix}.xlsx",
         data=buffer.getvalue(),
@@ -160,155 +394,73 @@ def export_to_excel(df, filename_prefix="report"):
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
+# If you are using pdfkit, make sure pdfkit_config is defined elsewhere as you had it
 def export_to_pdf_table(df, title="Report"):
-    """Exports a DataFrame to PDF using reportlab (pure Python, no external dependencies)."""
+    """Exports a DataFrame to PDF using pdfkit (wkhtmltopdf backend)."""
     if df is None or df.empty:
         st.warning("No data available to export.")
         return
-
-    # Create a BytesIO buffer for the PDF
-    buffer = io.BytesIO()
-    
-    # Determine page size and orientation based on number of columns
-    num_cols = len(df.columns)
-    if num_cols > 8:
-        page_size = landscape(A4)
-    else:
-        page_size = A4
-    
-    # Create the PDF document
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=page_size,
-        rightMargin=30,
-        leftMargin=30,
-        topMargin=50,
-        bottomMargin=30
-    )
-    
-    # Container for the 'Flowable' objects
-    elements = []
-    
-    # Define styles
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        'CustomTitle',
-        parent=styles['Heading1'],
-        fontSize=16,
-        textColor=colors.HexColor('#1f77b4'),
-        spaceAfter=20,
-        alignment=TA_CENTER
-    )
-    
-    # Add title
-    title_para = Paragraph(title, title_style)
-    elements.append(title_para)
-    elements.append(Spacer(1, 12))
-    
-    # Prepare table data
-    # Convert all data to strings to avoid any type issues
-    table_data = []
-    
-    # Add header row
-    header_row = [str(col) for col in df.columns]
-    table_data.append(header_row)
-    
-    # Add data rows
-    for idx, row in df.iterrows():
-        row_data = []
-        for val in row:
-            # Handle None, NaN, and other special values
-            if pd.isna(val):
-                row_data.append('')
-            elif isinstance(val, (int, float)):
-                # Format numbers nicely
-                if isinstance(val, float) and val != int(val):
-                    row_data.append(f'{val:.2f}')
-                else:
-                    row_data.append(str(int(val)))
-            else:
-                row_data.append(str(val))
-        table_data.append(row_data)
-    
-    # Calculate column widths based on page size
-    available_width = page_size[0] - 60  # Subtract margins
-    col_width = available_width / num_cols
-    
-    # Create the table
-    table = Table(table_data, colWidths=[col_width] * num_cols)
-    
-    # Style the table
-    table_style = TableStyle([
-        # Header row styling
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#f2f2f2')),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 10),
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-        
-        # Data rows styling
-        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-        ('FONTSIZE', (0, 1), (-1, -1), 8),
-        ('ALIGN', (0, 1), (-1, -1), 'CENTER'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        
-        # Borders
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-        ('BOX', (0, 0), (-1, -1), 1, colors.black),
-        
-        # Alternating row colors for better readability
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f9f9f9')]),
-    ])
-    
-    table.setStyle(table_style)
-    elements.append(table)
-    
-    # Add footer with timestamp
-    elements.append(Spacer(1, 20))
-    footer_style = ParagraphStyle(
-        'Footer',
-        parent=styles['Normal'],
-        fontSize=8,
-        textColor=colors.grey,
-        alignment=TA_CENTER
-    )
-    footer_text = f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    footer_para = Paragraph(footer_text, footer_style)
-    elements.append(footer_para)
-    
-    # Build PDF
-    try:
-        doc.build(elements)
-        buffer.seek(0)
-        
-        # Create download button
+    html = f"""
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <title>{title}</title>
+        <style>
+          body {{
+            font-family: Arial, sans-serif;
+            margin: 25px;
+          }}
+          h2 {{
+            text-align: center;
+            margin-bottom: 20px;
+          }}
+          table {{
+            border-collapse: collapse;
+            width: 100%;
+            font-size: 13px;
+          }}
+          th, td {{
+            border: 1px solid #ccc;
+            padding: 6px 10px;
+            text-align: center;
+          }}
+          th {{
+            background-color: #f2f2f2;
+            font-weight: bold;
+          }}
+        </style>
+      </head>
+      <body>
+        <h2>{title}</h2>
+        {df.to_html(index=False, justify="center")}
+      </body>
+    </html>
+    """
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmpfile:
+        # pdfkit_config must exist in your file
+        pdfkit.from_string(html, tmpfile.name, configuration=pdfkit_config)
+        tmpfile.seek(0)
         st.download_button(
             label=f"📄 Download {title}.pdf",
-            data=buffer.getvalue(),
+            data=tmpfile.read(),
             file_name=f"{title}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
             mime="application/pdf",
         )
-    except Exception as e:
-        st.error(f"Error generating PDF: {str(e)}")
-        st.error("Please try exporting to Excel instead.")
-    finally:
-        buffer.close()
 
 def export_buttons(df, base_name="report", title="Report"):
     """Render Excel + PDF export buttons side by side."""
     if df is None or df.empty:
         st.info("No data to export.")
         return
-
     c1, c2 = st.columns(2)
     with c1:
         export_to_excel(df, base_name)
     with c2:
         export_to_pdf_table(df, title)
 
-DB_FILE = 'fleet_management.db'
-
+# -------------------------
+# Date helpers
+# -------------------------
 def to_date(v):
     """
     Convert various date-like values to a python date.
@@ -317,23 +469,17 @@ def to_date(v):
     """
     if v is None:
         return None
-    # If already a date (but not datetime), return it
     if isinstance(v, date) and not isinstance(v, datetime):
         return v
-    # Pandas Timestamp or datetime -> date()
     if isinstance(v, datetime):
         return v.date()
-    # Try pandas to_datetime if available
     try:
-        import pandas as pd
         return pd.to_datetime(v).date()
     except Exception:
         pass
-    # Fallback strict parse assuming YYYY-MM-DD
     try:
         return datetime.strptime(str(v), '%Y-%m-%d').date()
     except Exception:
-        # As a last resort, try common formats
         for fmt in ('%m/%d/%Y', '%d/%m/%Y', '%Y/%m/%d'):
             try:
                 return datetime.strptime(str(v), fmt).date()
@@ -341,221 +487,9 @@ def to_date(v):
                 continue
     return None
 
-# -------------------------
-# OpenRouteService API Helper
-# -------------------------
-import requests
-import time
-
-ORS_API_KEY = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImI4M2U0MWVhZDc1NjQ2ZDVhMWNlOTlhNmNiNWQ3MjI4IiwiaCI6Im11cm11cjY0In0="
-
-def geocode_address(address: str) -> tuple:
-    """
-    Geocode an address to (longitude, latitude) using OpenRouteService.
-    Returns (None, None) if geocoding fails.
-    """
-    if not address or not address.strip():
-        return None, None
-    
-    try:
-        url = "https://api.openrouteservice.org/geocode/search"
-        headers = {
-            "Authorization": ORS_API_KEY,
-            "Accept": "application/json, application/geo+json"
-        }
-        params = {
-            "text": address.strip(),
-            "size": 1,
-            # Restrict to North America for trucking routes
-            "boundary.country": "US,CA,MX"
-        }
-        
-        response = requests.get(url, headers=headers, params=params, timeout=10)
-        
-        if response.status_code != 200:
-            return None, None
-        
-        data = response.json()
-        
-        if data.get("features") and len(data["features"]) > 0:
-            coords = data["features"][0]["geometry"]["coordinates"]
-            # Validate coordinates are in reasonable range for North America
-            lon, lat = coords[0], coords[1]
-            # North America bounds: roughly -170 to -50 longitude, 15 to 75 latitude
-            if -170 <= lon <= -50 and 15 <= lat <= 75:
-                return lon, lat
-            else:
-                # Coordinates outside North America - likely bad geocoding
-                return None, None
-        
-        return None, None
-        
-    except Exception:
-        return None, None
-
-
-def calculate_distance_miles(start_address: str, end_address: str, debug=False) -> float:
-    """
-    Calculate driving distance in miles between two addresses using OpenRouteService.
-    Returns 0.0 if calculation fails.
-    Max distance: ~3700 miles (6000km API limit)
-    """
-    if not start_address or not end_address:
-        if debug:
-            st.warning("Missing start or end address")
-        return 0.0
-    
-    # Geocode both addresses
-    start_lon, start_lat = geocode_address(start_address)
-    end_lon, end_lat = geocode_address(end_address)
-    
-    if not start_lon or not end_lon:
-        if debug:
-            st.warning(f"Geocoding failed for: {start_address} → {end_address}")
-        return 0.0
-    
-    if debug:
-        st.info(f"📍 Start: {start_address} → ({start_lat}, {start_lon})")
-        st.info(f"📍 End: {end_address} → ({end_lat}, {end_lon})")
-    
-    # Quick distance check using Haversine formula
-    from math import radians, sin, cos, sqrt, atan2
-    
-    R = 3958.8  # Earth radius in miles
-    lat1, lon1 = radians(start_lat), radians(start_lon)
-    lat2, lon2 = radians(end_lat), radians(end_lon)
-    
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    
-    a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
-    c = 2 * atan2(sqrt(a), sqrt(1-a))
-    straight_line_distance = R * c
-    
-    if debug:
-        st.info(f"📏 Straight-line distance: {straight_line_distance:.2f} miles")
-    
-    if straight_line_distance > 4000:
-        if debug:
-            st.warning(f"⚠️ Distance too large ({straight_line_distance:.0f} mi). Check addresses.")
-        return 0.0
-    
-    try:
-        url = "https://api.openrouteservice.org/v2/directions/driving-car"
-        headers = {
-            "Authorization": ORS_API_KEY,
-            "Content-Type": "application/json; charset=utf-8",
-            "Accept": "application/json"
-        }
-        body = {
-            "coordinates": [[start_lon, start_lat], [end_lon, end_lat]],
-            "units": "mi",
-            "instructions": False
-        }
-        
-        if debug:
-            st.json({"request": body})
-        
-        response = requests.post(url, headers=headers, json=body, timeout=15)
-        
-        if response.status_code == 400:
-            if debug:
-                st.error(f"API 400 Error: {response.text}")
-            return 0.0
-        
-        if response.status_code == 404:
-            if debug:
-                st.error(f"API 404 Error: {response.text}")
-            return 0.0
-        
-        if response.status_code != 200:
-            if debug:
-                st.error(f"API Error {response.status_code}: {response.text}")
-            return 0.0
-        
-        data = response.json()
-        
-        if debug:
-            st.json({"response": data})
-        
-        if not data.get("routes") or len(data["routes"]) == 0:
-            if debug:
-                st.warning("No routes found in API response")
-            return 0.0
-        
-        route = data["routes"][0]
-        summary = route.get("summary", {})
-        
-        # Get the raw distance value
-        distance_value = summary.get("distance", 0)
-        
-        if debug:
-            st.warning(f"🔍 RAW API DISTANCE VALUE: {distance_value}")
-            st.warning(f"🔍 API RESPONSE UNITS: {data.get('metadata', {}).get('query', {}).get('units', 'NOT SPECIFIED')}")
-        
-        if distance_value > 0:
-            # FIXED LOGIC: The API returns distance in the units we requested
-            # We requested "mi", so it should be in miles
-            # BUT: The API actually ignores the units parameter and ALWAYS returns meters
-            # We need to check if it's reasonable as miles first
-            
-            # Calculate what the driving distance should be roughly (straight-line * 1.3)
-            expected_driving_miles = straight_line_distance * 1.3
-            
-            # If the value is close to our expected miles, it's already in miles
-            if abs(distance_value - expected_driving_miles) < expected_driving_miles * 0.5:
-                # Value makes sense as miles
-                distance_miles = distance_value
-                if debug:
-                    st.success(f"✅ Distance appears to be in MILES: {distance_miles:.2f}")
-            elif distance_value > 1000:
-                # Definitely meters (too large to be miles or km)
-                distance_miles = distance_value / 1609.344
-                if debug:
-                    st.success(f"✅ Converted from METERS to miles: {distance_miles:.2f}")
-            elif distance_value / 1609.344 < expected_driving_miles * 2:
-                # Treating as meters gives reasonable result
-                distance_miles = distance_value / 1609.344
-                if debug:
-                    st.success(f"✅ Converted from METERS to miles: {distance_miles:.2f}")
-            else:
-                # Probably kilometers
-                distance_miles = distance_value * 0.621371
-                if debug:
-                    st.success(f"✅ Converted from KM to miles: {distance_miles:.2f}")
-            
-            return round(distance_miles, 2)
-        
-        return 0.0
-        
-    except requests.exceptions.RequestException as e:
-        if debug:
-            st.error(f"Request error: {e}")
-        return 0.0
-    except Exception as e:
-        if debug:
-            st.error(f"Unexpected error: {e}")
-        return 0.0
-
-def save_uploaded_file_to_base64(uploaded_file):
-    """Convert uploaded file to base64 for storage"""
-    try:
-        import base64
-        file_bytes = uploaded_file.read()
-        encoded = base64.b64encode(file_bytes).decode('utf-8')
-        return {
-            'filename': uploaded_file.name,
-            'content_type': uploaded_file.type,
-            'data': encoded
-        }
-    except Exception as e:
-        st.error(f"Error processing file {uploaded_file.name}: {e}")
-        return None
-
 def get_preset_date_range(preset):
-    """Get date range based on preset selection"""
+    """Return (start_date, end_date) for common presets."""
     today = date.today()
-    
     if preset == "Today":
         return today, today
     elif preset == "Last 7 days":
@@ -565,280 +499,136 @@ def get_preset_date_range(preset):
     elif preset == "This Month":
         return today.replace(day=1), today
     elif preset == "Last Month":
-        last_month = today.replace(day=1) - timedelta(days=1)
-        return last_month.replace(day=1), last_month
+        first_this_month = today.replace(day=1)
+        last_month_end = first_this_month - timedelta(days=1)
+        last_month_start = last_month_end.replace(day=1)
+        return last_month_start, last_month_end
     elif preset == "This Quarter":
         quarter_start_month = ((today.month - 1) // 3) * 3 + 1
         return today.replace(month=quarter_start_month, day=1), today
     elif preset == "Last Quarter":
         quarter_start_month = ((today.month - 1) // 3) * 3 + 1
-        this_quarter_start = today.replace(month=quarter_start_month, day=1)
-        last_quarter_end = this_quarter_start - timedelta(days=1)
-        last_quarter_start = last_quarter_end.replace(day=1) - timedelta(days=60)
-        last_quarter_start = last_quarter_start.replace(day=1)
-        return last_quarter_start, last_quarter_end
+        this_q_start = today.replace(month=quarter_start_month, day=1)
+        last_q_end = this_q_start - timedelta(days=1)
+        last_q_start_month = ((last_q_end.month - 1) // 3) * 3 + 1
+        last_q_start = last_q_end.replace(month=last_q_start_month, day=1)
+        return last_q_start, last_q_end
     elif preset == "Year-To-Date":
-        return today.replace(month=1, day=1), today
+        return date(today.year, 1, 1), today
     elif preset == "Last Year":
-        return today.replace(year=today.year-1, month=1, day=1), today.replace(year=today.year-1, month=12, day=31)
+        return date(today.year - 1, 1, 1), date(today.year - 1, 12, 31)
     elif preset == "All Time":
-        return date(2000, 1, 1), today
+        return COMPANY_START, today
     else:
-        return today.replace(month=1, day=1), today
+        return today.replace(month=1, day=1), today  # default YTD
 
-def ensure_expenses_attachments():
-    """Ensure expenses table has attachments column"""
+# -------------------------
+# OpenRouteService API Helper
+# -------------------------
+ORS_API_KEY = st.secrets.get("ORS_API_KEY", "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImI4M2U0MWVhZDc1NjQ2ZDVhMWNlOTlhNmNiNWQ3MjI4IiwiaCI6Im11cm11cjY0In0=")
+
+def geocode_address(address: str) -> tuple:
+    """
+    Geocode an address to (longitude, latitude) using OpenRouteService.
+    Returns (None, None) if geocoding fails.
+    """
+    if not address or not address.strip():
+        return None, None
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # Check if attachments column exists
-        cur.execute("PRAGMA table_info(expenses)")
-        columns = [col[1] for col in cur.fetchall()]
-        
-        if 'attachments' not in columns:
-            cur.execute("ALTER TABLE expenses ADD COLUMN attachments TEXT DEFAULT '[]'")
-            conn.commit()
-        
-        conn.close()
+        url = "https://api.openrouteservice.org/geocode/search"
+        headers = {"Authorization": ORS_API_KEY, "Accept": "application/json, application/geo+json"}
+        params = {"text": address.strip(), "size": 1, "boundary.country": "US,CA,MX"}
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        if response.status_code != 200:
+            return None, None
+        data = response.json()
+        if data.get("features"):
+            lon, lat = data["features"][0]["geometry"]["coordinates"]
+            if -170 <= lon <= -50 and 15 <= lat <= 75:
+                return lon, lat
+        return None, None
+    except Exception:
+        return None, None
+
+def calculate_distance_miles(start_address: str, end_address: str, debug=False) -> float:
+    """
+    Calculate driving distance in miles between two addresses using OpenRouteService.
+    Returns 0.0 if calculation fails.
+    """
+    if not start_address or not end_address:
+        if debug:
+            st.warning("Missing start or end address")
+        return 0.0
+    start_lon, start_lat = geocode_address(start_address)
+    end_lon, end_lat = geocode_address(end_address)
+    if start_lon is None or end_lon is None:
+        if debug:
+            st.warning(f"Geocoding failed for: {start_address} → {end_address}")
+        return 0.0
+    # Quick distance check using Haversine formula
+    from math import radians, sin, cos, sqrt, atan2
+    R = 3958.8  # Earth radius in miles
+    lat1, lon1 = radians(start_lat), radians(start_lon)
+    lat2, lon2 = radians(end_lat), radians(end_lon)
+    a = sin((lat2-lat1)/2)**2 + cos(lat1)*cos(lat2)*sin((lon2-lon1)/2)**2
+    straight_line_distance = 2 * atan2(sqrt(a), sqrt(1-a)) * R
+    if debug:
+        st.info(f"📏 Straight-line distance: {straight_line_distance:.2f} miles")
+    if straight_line_distance > 4000:
+        if debug:
+            st.warning(f"⚠️ Distance too large ({straight_line_distance:.0f} mi). Check addresses.")
+        return 0.0
+    try:
+        url = "https://api.openrouteservice.org/v2/directions/driving-car"
+        headers = {
+            "Authorization": ORS_API_KEY,
+            "Content-Type": "application/json; charset=utf-8",
+            "Accept": "application/json"
+        }
+        body = {"coordinates": [[start_lon, start_lat], [end_lon, end_lat]], "units": "mi", "instructions": False}
+        if debug:
+            st.json({"request": body})
+        response = requests.post(url, headers=headers, json=body, timeout=15)
+        if response.status_code in (400, 404):
+            if debug:
+                st.error(f"API {response.status_code} Error: {response.text}")
+            return 0.0
+        if response.status_code != 200:
+            if debug:
+                st.error(f"API Error {response.status_code}: {response.text}")
+            return 0.0
+        data = response.json()
+        if debug:
+            st.json({"response": data})
+        if not data.get("routes"):
+            if debug:
+                st.warning("No routes found in API response")
+            return 0.0
+        summary = data["routes"][0].get("summary", {})
+        distance_value = summary.get("distance", 0)
+        if distance_value > 0:
+            # The API typically returns meters; convert if value is too large to be miles
+            expected_driving_miles = straight_line_distance * 1.3
+            if abs(distance_value - expected_driving_miles) < expected_driving_miles * 0.5:
+                distance_miles = distance_value
+            elif distance_value > 1000 or (distance_value / 1609.344) < expected_driving_miles * 2:
+                distance_miles = distance_value / 1609.344
+            else:
+                distance_miles = distance_value * 0.621371
+            return round(distance_miles, 2)
+        return 0.0
+    except requests.exceptions.RequestException as e:
+        if debug:
+            st.error(f"Request error: {e}")
+        return 0.0
     except Exception as e:
-        st.error(f"Error ensuring attachments column: {e}")
-
-# -------------------------
-# Expense categories and metadata (DB migration + helpers)
-# -------------------------
-
-def ensure_expense_categories_table():
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS expense_categories (
-                category_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT UNIQUE NOT NULL,
-                schema_json TEXT NOT NULL,        -- JSON list of field definitions (excluding Truck Number)
-                default_apply_mode TEXT NOT NULL -- "individual" | "divide" | "exclude"
-            )
-        """)
-        # ensure expenses table has metadata and apply_mode columns
-        try:
-            cur.execute("ALTER TABLE expenses ADD COLUMN metadata TEXT")
-        except sqlite3.OperationalError:
-            pass
-        try:
-            cur.execute("ALTER TABLE expenses ADD COLUMN apply_mode TEXT")
-        except sqlite3.OperationalError:
-            pass
-        conn.commit()
-    finally:
-        if conn:
-            conn.close()
-
-
-def get_expense_categories():
-    ensure_expense_categories_table()
-    conn = get_db_connection()
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT name, schema_json, default_apply_mode FROM expense_categories ORDER BY name")
-        rows = cur.fetchall()
-        cats = []
-        for name, schema_json, default_apply_mode in rows:
-            try:
-                schema = json.loads(schema_json)
-            except Exception:
-                schema = []
-            cats.append({"name": name, "schema": schema, "default_apply_mode": default_apply_mode})
-        return cats
-    finally:
-        conn.close()
-
-
-def add_or_update_expense_category(name, field_list, default_apply_mode="individual"):
-    """
-    field_list: list of dicts, each dict: {"key": "card_number", "label": "Card Number", "type": "text"}
-    Note: user-visible fields exclude the leading 'truck_number' which is always implicit.
-    """
-    ensure_expense_categories_table()
-    conn = get_db_connection()
-    try:
-        cur = conn.cursor()
-        schema_json = json.dumps(field_list)
-        # try update then insert
-        try:
-            cur.execute("INSERT INTO expense_categories (name, schema_json, default_apply_mode) VALUES (?, ?, ?)",
-                        (name, schema_json, default_apply_mode))
-        except sqlite3.IntegrityError:
-            cur.execute("UPDATE expense_categories SET schema_json=?, default_apply_mode=? WHERE name=?",
-                        (schema_json, default_apply_mode, name))
-        conn.commit()
-    finally:
-        conn.close()
-
-
-# Pre-create Fuel and Tolls categories (will not overwrite if user modified)
-def ensure_default_expense_categories():
-    # Fuel: Truck Number | Card Number | Transaction date | Location | Amount paid | Discount amount
-    fuel_schema = [
-        {"key": "card_number", "label": "Card Number", "type": "text"},
-        {"key": "transaction_date", "label": "Transaction Date", "type": "date"},
-        {"key": "location", "label": "Location", "type": "text"},
-        {"key": "amount_paid", "label": "Amount Paid", "type": "number"},
-        {"key": "discount_amount", "label": "Discount Amount", "type": "number"}
-    ]
-    add_or_update_expense_category("Fuel", fuel_schema, default_apply_mode="individual")
-
-    # Tolls: Truck Number | Toll Agency | Date occurred | Toll amount
-    tolls_schema = [
-        {"key": "toll_agency", "label": "Toll Agency", "type": "text"},
-        {"key": "date_occurred", "label": "Date Occurred", "type": "date"},
-        {"key": "toll_amount", "label": "Toll Amount", "type": "number"}
-    ]
-    add_or_update_expense_category("Tolls", tolls_schema, default_apply_mode="individual")
-
-# Ensure Maintenance category exists with editable fields (separate top-level function)
-def ensure_maintenance_category():
-    maintenance_schema = [
-        {"key": "service_type", "label": "Service Type", "type": "text"},
-        {"key": "parts_cost", "label": "Parts Cost", "type": "number"},
-        {"key": "labor_cost", "label": "Labor Cost", "type": "number"},
-        {"key": "location", "label": "Location", "type": "text"}
-    ]
-    add_or_update_expense_category("Maintenance", maintenance_schema, default_apply_mode="individual")
-
-
-def compute_per_truck_expense_breakdown_range(start_date, end_date):
-    """
-    Returns a DataFrame with per-truck expense totals within [start_date, end_date]:
-    columns: truck_id, truck_number, total_individual, total_divided, total_expenses
-    """
-    conn = get_db_connection()
-    try:
-        # Pull expenses in range
-        exp = pd.read_sql_query(
-            """
-            SELECT expense_id, date, category, amount, truck_id, apply_mode
-            FROM expenses
-            WHERE date BETWEEN ? AND ?
-            """,
-            conn,
-            params=(start_date, end_date)
-        )
-        # Pull trucks to map number
-        trucks = pd.read_sql_query(
-            "SELECT truck_id, number FROM trucks",
-            conn
-        )
-    finally:
-        conn.close()
-
-    if exp.empty:
-        # Return empty schema-compatible DF
-        return pd.DataFrame(columns=["truck_id", "truck_number", "total_individual", "total_divided", "total_expenses"])
-
-    # Normalize types
-    if "amount" in exp.columns:
-        exp["amount"] = pd.to_numeric(exp["amount"], errors="coerce").fillna(0.0)
-
-    # Treat divide rows: divide mode already inserts per-truck rows
-    indiv_mask = exp["apply_mode"] != "divide"
-    div_mask = exp["apply_mode"] == "divide"
-
-    # Group per truck
-    grouped_indiv = exp[indiv_mask].groupby("truck_id", dropna=False)["amount"].sum().rename("total_individual")
-    grouped_div = exp[div_mask].groupby("truck_id", dropna=False)["amount"].sum().rename("total_divided")
-
-    # Build output from unique truck_ids in expenses
-    unique_ids = exp["truck_id"].unique()
-    out = pd.DataFrame({"truck_id": unique_ids})
-
-    out = out.merge(grouped_indiv.reset_index(), on="truck_id", how="left")
-    out = out.merge(grouped_div.reset_index(), on="truck_id", how="left")
-
-    out["total_individual"] = out["total_individual"].fillna(0.0).astype(float)
-    out["total_divided"] = out["total_divided"].fillna(0.0).astype(float)
-    out["total_expenses"] = (out["total_individual"] + out["total_divided"]).astype(float)
-
-    # Map truck number
-    if not trucks.empty:
-        id_to_number = {int(r["truck_id"]): str(r["number"]) for _, r in trucks.iterrows()}
-        def tlabel(tid):
-            if tid is None or (isinstance(tid, float) and pd.isna(tid)):
-                return "[None]"
-            try:
-                return id_to_number.get(int(tid), f"[ID:{int(tid)}]")
-            except Exception:
-                return "[Unknown]"
-        out["truck_number"] = out["truck_id"].apply(tlabel)
-    else:
-        out["truck_number"] = out["truck_id"].apply(lambda x: "[None]" if pd.isna(x) else f"[ID:{int(x)}]" if not pd.isna(x) else "[Unknown]")
-
-    # Order columns
-    out = out[["truck_id", "truck_number", "total_individual", "total_divided", "total_expenses"]]
-
-    # Sort by total_expenses desc for readability
-    out = out.sort_values("total_expenses", ascending=False).reset_index(drop=True)
-
-    return out
-
-# Safe DB cleanup helper (place right after DB_FILE definition)
-def close_all_db_connections_if_any():
-    """
-    Close any long-lived/global DB connections your app might keep open.
-    Modify this to close any global variables you use (e.g. `global_conn`, `db_conn`, `engine`, etc.)
-    This is called before replacing/removing the DB file to avoid file-locking issues.
-    """
-    try:
-        # Example: if you keep a global sqlite3 connection named `global_conn` or `db_conn`
-        for name in ('global_conn', 'global_connection', 'db_conn', 'conn'):
-            if name in globals():
-                obj = globals().get(name)
-                if obj:
-                    try:
-                        obj.close()
-                    except Exception:
-                        pass
-                    try:
-                        globals()[name] = None
-                    except Exception:
-                        pass
-    except Exception:
-        pass
-
-    # Example: if you use SQLAlchemy engine named `engine`
-    try:
-        if 'engine' in globals() and globals().get('engine'):
-            try:
-                globals()['engine'].dispose()
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    # If you maintain any other persistent resources, add cleanup code here.
-
-### Safe rerun helper: call this instead of st.experimental_rerun()
-def safe_rerun():
-    # prefer Streamlit's built-in experimental rerun if available
-    if hasattr(st, "experimental_rerun"):
-        try:
-            st.experimental_rerun()
-            return
-        except Exception:
-            # fall through to fallback
-            pass
-
-    # Fallback: toggle a small session_state flag to trigger a rerun, then stop the current run
-    st.session_state["_rerun_trigger"] = not st.session_state.get("_rerun_trigger", False)
-    st.stop()
+        if debug:
+            st.error(f"Unexpected error: {e}")
+        return 0.0
 
 # -------------------------
 # Attachment helpers
 # -------------------------
-import base64
-import mimetypes
-
 def save_uploaded_file_to_base64(uploaded_file):
     """Convert uploaded file to base64 string with metadata."""
     try:
@@ -897,307 +687,101 @@ def remove_attachment_from_expense(expense_id, attachment_index):
         conn.close()
 
 # -------------------------
-# Preset date range helper
+# Expense categories and metadata
 # -------------------------
-def get_preset_date_range(preset):
-    """Return (start_date, end_date) for common presets."""
-    today = date.today()
-    if preset == "Today":
-        return today, today
-    elif preset == "Last 7 days":
-        return today - timedelta(days=7), today
-    elif preset == "Last 30 days":
-        return today - timedelta(days=30), today
-    elif preset == "This Month":
-        return today.replace(day=1), today
-    elif preset == "Last Month":
-        first_this_month = today.replace(day=1)
-        last_month_end = first_this_month - timedelta(days=1)
-        last_month_start = last_month_end.replace(day=1)
-        return last_month_start, last_month_end
-    elif preset == "This Quarter":
-        quarter_start_month = ((today.month - 1) // 3) * 3 + 1
-        return today.replace(month=quarter_start_month, day=1), today
-    elif preset == "Last Quarter":
-        quarter_start_month = ((today.month - 1) // 3) * 3 + 1
-        this_q_start = today.replace(month=quarter_start_month, day=1)
-        last_q_end = this_q_start - timedelta(days=1)
-        last_q_start_month = ((last_q_end.month - 1) // 3) * 3 + 1
-        last_q_start = last_q_end.replace(month=last_q_start_month, day=1)
-        return last_q_start, last_q_end
-    elif preset == "Year-To-Date":
-        return date(today.year, 1, 1), today
-    elif preset == "Last Year":
-        return date(today.year - 1, 1, 1), date(today.year - 1, 12, 31)
-    elif preset == "All Time":
-        return COMPANY_START, today
-    else:
-        return today.replace(month=1, day=1), today  # default YTD
-
-
-# -------------------------
-# Core DB creation & migration
-# -------------------------
-def init_database():
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    
-    # trucks
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS trucks (
-        truck_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        number TEXT UNIQUE,
-        make TEXT,
-        model TEXT,
-        year INTEGER,
-        plate TEXT,
-        vin TEXT,
-        status TEXT DEFAULT 'Active',
-        trailer_id INTEGER,
-        driver_id INTEGER,
-        loan_amount REAL DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-    
-    # trailers
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS trailers (
-        trailer_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        number TEXT UNIQUE,
-        type TEXT,
-        year INTEGER,
-        plate TEXT,
-        vin TEXT,
-        status TEXT DEFAULT 'Active',
-        loan_amount REAL DEFAULT 0,
-        truck_id INTEGER,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-    
-    # drivers
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS drivers (
-        driver_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        license_number TEXT,
-        phone TEXT,
-        email TEXT,
-        hire_date DATE,
-        status TEXT DEFAULT 'Active',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-    
-    # expenses
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS expenses (
-        expense_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        date DATE NOT NULL,
-        category TEXT NOT NULL,
-        amount REAL NOT NULL,
-        truck_id INTEGER,
-        description TEXT,
-        location TEXT,
-        service_type TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (truck_id) REFERENCES trucks (truck_id)
-    )
-    ''')
-
-    # income
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS income (
-        income_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        date DATE NOT NULL,
-        source TEXT NOT NULL,
-        amount REAL NOT NULL,
-        truck_id INTEGER,
-        description TEXT,
-        pickup_date DATE,
-        pickup_address TEXT,
-        delivery_date DATE,
-        delivery_address TEXT,
-        job_reference TEXT,
-        empty_miles REAL,
-        loaded_miles REAL,
-        rpm REAL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (truck_id) REFERENCES trucks (truck_id)
-    )
-    ''')
-
-    # Add these columns to your income table initialization
-    try:
-        cur.execute("ALTER TABLE income ADD COLUMN driver_name TEXT")
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        cur.execute("ALTER TABLE income ADD COLUMN broker_number TEXT")
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        cur.execute("ALTER TABLE income ADD COLUMN tonu TEXT DEFAULT 'N'")
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        cur.execute("ALTER TABLE income ADD COLUMN pickup_city TEXT")
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        cur.execute("ALTER TABLE income ADD COLUMN pickup_state TEXT")
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        cur.execute("ALTER TABLE income ADD COLUMN pickup_zip TEXT")
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        cur.execute("ALTER TABLE income ADD COLUMN delivery_city TEXT")
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        cur.execute("ALTER TABLE income ADD COLUMN delivery_state TEXT")
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        cur.execute("ALTER TABLE income ADD COLUMN delivery_zip TEXT")
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        cur.execute("ALTER TABLE income ADD COLUMN stops INTEGER")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE income ADD COLUMN pickup_full_address TEXT")
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        cur.execute("ALTER TABLE income ADD COLUMN delivery_full_address TEXT")
-    except sqlite3.OperationalError:
-        pass
-
-    conn.commit()
-    conn.close()
-
-# call initial DB creation
-init_database()
-
-# -------------------------
-# DB connection helper (must exist before migrations that use it)
-# -------------------------
-# Absolute DB path (keep as you have)
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FILE = os.path.join(APP_DIR, "fleet_management.db")
-
-def get_db_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(
-        DB_FILE,
-        detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
-        check_same_thread=False,
-    )
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA foreign_keys = ON;")
-    except Exception:
-        pass
-    return conn
-
-def close_all_db_connections():
-    # No-op now; kept for compatibility
-    pass
-
-def close_all_db_connections_if_any():
-    # No-op now; kept for compatibility
-    pass
-
-def init_users_db():
-    """Initialize users and authentication tables"""
+def ensure_expense_categories_table():
     conn = get_db_connection()
-    cur = conn.cursor()
-    
-    # Users table with page permissions
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            full_name TEXT,
-            email TEXT,
-            role TEXT NOT NULL DEFAULT 'viewer',
-            allowed_pages TEXT,
-            is_active INTEGER DEFAULT 1,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_login TIMESTAMP
-        )
-    """)
-    
-    # Session logs table (for audit trail)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS session_logs (
-            log_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            username TEXT,
-            action TEXT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            ip_address TEXT,
-            FOREIGN KEY (user_id) REFERENCES users(user_id)
-        )
-    """)
-    
-    # Check if allowed_pages column exists, if not add it
-    cur.execute("PRAGMA table_info(users)")
-    columns = [col[1] for col in cur.fetchall()]
-    if 'allowed_pages' not in columns:
-        cur.execute("ALTER TABLE users ADD COLUMN allowed_pages TEXT")
-    
-    # Create default admin user if no users exist
-    cur.execute("SELECT COUNT(*) FROM users")
-    if cur.fetchone()[0] == 0:
-        import hashlib
-        default_password = "admin123"
-        password_hash = hashlib.sha256(default_password.encode()).hexdigest()
-        all_pages = json.dumps(["Dashboard", "Trucks", "Trailers", "Drivers", "Dispatchers", 
-                                "Income", "Expenses", "Reports", "Histories", "Bulk Upload", 
-                                "Settings", "👥 User Management"])
-        cur.execute("""
-            INSERT INTO users (username, password_hash, full_name, role, allowed_pages, is_active)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, ("admin", password_hash, "System Administrator", "admin", all_pages, 1))
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS expense_categories (
+                category_id SERIAL PRIMARY KEY,
+                name TEXT UNIQUE NOT NULL,
+                schema_json TEXT NOT NULL,
+                default_apply_mode TEXT NOT NULL
+            )
+        """)
+        # ensure expenses table has metadata and apply_mode columns
+        for alter in ("ALTER TABLE expenses ADD COLUMN metadata TEXT",
+                      "ALTER TABLE expenses ADD COLUMN apply_mode TEXT"):
+            try:
+                conn.execute(alter))
+            except SQLAlchemyError:
+                pass
+    finally:
+        conn.close()
+
+def get_expense_categories():
+    ensure_expense_categories_table()
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT name, schema_json, default_apply_mode FROM expense_categories ORDER BY name")
+        rows = cur.fetchall()
+        cats = []
+        for name, schema_json, default_apply_mode in rows:
+            try:
+                schema = json.loads(schema_json)
+            except Exception:
+                schema = []
+            cats.append({"name": name, "schema": schema, "default_apply_mode": default_apply_mode})
+        return cats
+    finally:
+        conn.close()
+
+def add_or_update_expense_category(name, field_list, default_apply_mode="individual"):
+    """
+    field_list: list of dicts, each dict: {"key": "card_number", "label": "Card Number", "type": "text"}
+    """
+    ensure_expense_categories_table()
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        schema_json = json.dumps(field_list)
+        try:
+            cur.execute("INSERT INTO expense_categories (name, schema_json, default_apply_mode) VALUES (?, ?, ?)",
+                        (name, schema_json, default_apply_mode))
+        except SQLAlchemyErrorIntegrityError:
+            cur.execute("UPDATE expense_categories SET schema_json=?, default_apply_mode=? WHERE name=?",
+                        (schema_json, default_apply_mode, name))
         conn.commit()
-    
-    conn.close()
+    finally:
+        conn.close()
 
-# Call this in your main initialization
-init_users_db()
+def ensure_default_expense_categories():
+    fuel_schema = [
+        {"key": "card_number", "label": "Card Number", "type": "text"},
+        {"key": "transaction_date", "label": "Transaction Date", "type": "date"},
+        {"key": "location", "label": "Location", "type": "text"},
+        {"key": "amount_paid", "label": "Amount Paid", "type": "number"},
+        {"key": "discount_amount", "label": "Discount Amount", "type": "number"}
+    ]
+    add_or_update_expense_category("Fuel", fuel_schema, default_apply_mode="individual")
+    tolls_schema = [
+        {"key": "toll_agency", "label": "Toll Agency", "type": "text"},
+        {"key": "date_occurred", "label": "Date Occurred", "type": "date"},
+        {"key": "toll_amount", "label": "Toll Amount", "type": "number"}
+    ]
+    add_or_update_expense_category("Tolls", tolls_schema, default_apply_mode="individual")
 
-# -------------------------
-# Expenses attachments & indexes (add near your ensure_expenses_table function)
-# -------------------------
+def ensure_maintenance_category():
+    maintenance_schema = [
+        {"key": "service_type", "label": "Service Type", "type": "text"},
+        {"key": "parts_cost", "label": "Parts Cost", "type": "number"},
+        {"key": "labor_cost", "label": "Labor Cost", "type": "number"},
+        {"key": "location", "label": "Location", "type": "text"}
+    ]
+    add_or_update_expense_category("Maintenance", maintenance_schema, default_apply_mode="individual")
+
 def ensure_expenses_attachments():
     """Add attachments column to expenses table if it doesn't exist, and create indexes for performance."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        # Check if attachments column exists
-        cur.execute("PRAGMA table_info(expenses)")
+        # PostgreSQL: PRAGMA not needed
         columns = [row[1] for row in cur.fetchall()]
         if "attachments" not in columns:
             cur.execute("ALTER TABLE expenses ADD COLUMN attachments TEXT")
             conn.commit()
-        
-        # Create indexes for common queries (safe to run multiple times)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(date)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_expenses_category ON expenses(category)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_expenses_truck_id ON expenses(truck_id)")
@@ -1207,176 +791,372 @@ def ensure_expenses_attachments():
         conn.close()
 
 # -------------------------
-# History tables: loans + assignment histories
+# Core DB creation & migration
 # -------------------------
-def init_history_tables():
+def init_database():
+    conn = get_db_connection()
+    try:
+        # trucks
+        conn.execute('''
+        CREATE TABLE IF NOT EXISTS trucks (
+            truck_id SERIAL PRIMARY KEY,
+            number TEXT UNIQUE,
+            make TEXT,
+            model TEXT,
+            year INTEGER,
+            plate TEXT,
+            vin TEXT,
+            status TEXT DEFAULT 'Active',
+            trailer_id INTEGER,
+            driver_id INTEGER,
+            loan_amount REAL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        '''))
+        # trailers
+        conn.execute('''
+        CREATE TABLE IF NOT EXISTS trailers (
+            trailer_id SERIAL PRIMARY KEY,
+            number TEXT UNIQUE,
+            type TEXT,
+            year INTEGER,
+            plate TEXT,
+            vin TEXT,
+            status TEXT DEFAULT 'Active',
+            loan_amount REAL DEFAULT 0,
+            truck_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        '''))
+        # drivers
+        conn.execute('''
+        CREATE TABLE IF NOT EXISTS drivers (
+            driver_id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            license_number TEXT,
+            phone TEXT,
+            email TEXT,
+            hire_date DATE,
+            status TEXT DEFAULT 'Active',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        '''))
+        # expenses
+        conn.execute('''
+        CREATE TABLE IF NOT EXISTS expenses (
+            expense_id SERIAL PRIMARY KEY,
+            date DATE NOT NULL,
+            category TEXT NOT NULL,
+            amount REAL NOT NULL,
+            truck_id INTEGER,
+            description TEXT,
+            location TEXT,
+            service_type TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        '''))
+        # income
+        conn.execute('''
+        CREATE TABLE IF NOT EXISTS income (
+            income_id SERIAL PRIMARY KEY,
+            date DATE NOT NULL,
+            source TEXT NOT NULL,
+            amount REAL NOT NULL,
+            truck_id INTEGER,
+            description TEXT,
+            pickup_date DATE,
+            pickup_address TEXT,
+            delivery_date DATE,
+            delivery_address TEXT,
+            job_reference TEXT,
+            empty_miles REAL,
+            loaded_miles REAL,
+            rpm REAL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        '''))
+        # extra income columns (idempotent)
+        for alter_sql in [
+            "ALTER TABLE income ADD COLUMN driver_name TEXT",
+            "ALTER TABLE income ADD COLUMN broker_number TEXT",
+            "ALTER TABLE income ADD COLUMN tonu TEXT DEFAULT 'N'",
+            "ALTER TABLE income ADD COLUMN pickup_city TEXT",
+            "ALTER TABLE income ADD COLUMN pickup_state TEXT",
+            "ALTER TABLE income ADD COLUMN pickup_zip TEXT",
+            "ALTER TABLE income ADD COLUMN delivery_city TEXT",
+            "ALTER TABLE income ADD COLUMN delivery_state TEXT",
+            "ALTER TABLE income ADD COLUMN delivery_zip TEXT",
+            "ALTER TABLE income ADD COLUMN stops INTEGER",
+            "ALTER TABLE income ADD COLUMN pickup_full_address TEXT",
+            "ALTER TABLE income ADD COLUMN delivery_full_address TEXT"
+        ]:
+            try:
+                conn.execute(alter_sql))
+            except SQLAlchemyError:
+                pass
+    finally:
+        conn.close()
+
+    try:
+        with get_db_connection() as c:
+            v = c.execute("SELECT version()").scalar()
+        st.success("Connected to Postgres")
+        st.caption(v)
+    except Exception as e:
+        st.error(f"Database connection failed: {e}")
+        st.stop()
+
+# call initial DB creation
+init_database()
+
+def ensure_truck_and_trailer_extra_columns():
     conn = get_db_connection()
     cur = conn.cursor()
+    # trucks.notes
+    try:
+        cur.execute("ALTER TABLE trucks ADD COLUMN notes TEXT")
+    except SQLAlchemyError:
+        pass
+    # trucks.color (optional if UI references it)
+    try:
+        cur.execute("ALTER TABLE trucks ADD COLUMN color TEXT")
+    except SQLAlchemyError:
+        pass
+    # trucks.owner (optional if UI references it)
+    try:
+        cur.execute("ALTER TABLE trucks ADD COLUMN owner TEXT")
+    except SQLAlchemyError:
+        pass
 
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS loans_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        entity_type TEXT NOT NULL, -- 'truck' or 'trailer'
-        entity_id INTEGER NOT NULL,
-        monthly_amount REAL NOT NULL,
-        start_date DATE NOT NULL,
-        end_date DATE,
-        note TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
+    # trailers.trailer_number (your query references it)
+    try:
+        cur.execute("ALTER TABLE trailers ADD COLUMN trailer_number TEXT")
+    except SQLAlchemyError:
+        pass
 
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS trailer_truck_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        trailer_id INTEGER NOT NULL,
-        old_truck_id INTEGER,
-        new_truck_id INTEGER,
-        start_date DATE NOT NULL,
-        end_date DATE,
-        note TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
+    # Also ensure dispatcher link table if your query uses it
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS truck_dispatcher_link (
+            id SERIAL PRIMARY KEY,
+            truck_id INTEGER NOT NULL,
+            dispatcher_id INTEGER NOT NULL,
+            start_date DATE NOT NULL DEFAULT (CURRENT_DATE),
+            end_date DATE,
+            FOREIGN KEY (truck_id) REFERENCES trucks(truck_id) ON DELETE CASCADE,
+            FOREIGN KEY (dispatcher_id) REFERENCES dispatchers(dispatcher_id) ON DELETE CASCADE
+        )
+    """)
 
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS driver_assignment_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        driver_id INTEGER NOT NULL,
-        truck_id INTEGER,
-        trailer_id INTEGER,
-        start_date DATE NOT NULL,
-        end_date DATE,
-        note TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
+    # Helpful indexes
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_tdl_truck ON truck_dispatcher_link(truck_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_tdl_dispatcher ON truck_dispatcher_link(dispatcher_id)")
 
     conn.commit()
     conn.close()
 
+# Call it after init_database()
+ensure_truck_and_trailer_extra_columns()
+
+def ensure_income_extra_columns():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    # Time fields
+    try:
+        cur.execute("ALTER TABLE income ADD COLUMN pickup_time TEXT")
+    except SQLAlchemyError:
+        pass
+    try:
+        cur.execute("ALTER TABLE income ADD COLUMN delivery_time TEXT")
+    except SQLAlchemyError:
+        pass
+
+    # Ensure all columns referenced by the Income page exist (idempotent guards)
+    for sql in [
+        "ALTER TABLE income ADD COLUMN driver_name TEXT",
+        "ALTER TABLE income ADD COLUMN broker_number TEXT",
+        "ALTER TABLE income ADD COLUMN tonu TEXT DEFAULT 'N'",
+        "ALTER TABLE income ADD COLUMN empty_miles REAL",
+        "ALTER TABLE income ADD COLUMN loaded_miles REAL",
+        "ALTER TABLE income ADD COLUMN rpm REAL",
+        "ALTER TABLE income ADD COLUMN pickup_city TEXT",
+        "ALTER TABLE income ADD COLUMN pickup_state TEXT",
+        "ALTER TABLE income ADD COLUMN pickup_zip TEXT",
+        "ALTER TABLE income ADD COLUMN pickup_address TEXT",
+        "ALTER TABLE income ADD COLUMN delivery_city TEXT",
+        "ALTER TABLE income ADD COLUMN delivery_state TEXT",
+        "ALTER TABLE income ADD COLUMN delivery_zip TEXT",
+        "ALTER TABLE income ADD COLUMN delivery_address TEXT",
+        "ALTER TABLE income ADD COLUMN stops INTEGER",
+        "ALTER TABLE income ADD COLUMN pickup_full_address TEXT",
+        "ALTER TABLE income ADD COLUMN delivery_full_address TEXT",
+        # If you renamed "Description" to "Load number", ensure that column name exists in DB
+        # (your UI might still use i.description, so we keep it)
+    ]:
+        try:
+            cur.execute(sql)
+        except SQLAlchemyError:
+            pass
+
+    # Helpful indexes for date-range queries
+    try:
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_income_date ON income(date)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_income_truck ON income(truck_id)")
+    except Exception:
+        pass
+
+    conn.commit()
+    conn.close()
+
+# Call this during startup, after init_database()
+ensure_income_extra_columns()
+
+def ensure_expenses_fuel_columns():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("ALTER TABLE expenses ADD COLUMN gallons REAL")
+    except SQLAlchemyError:
+        pass
+    try:
+        cur.execute("ALTER TABLE expenses ADD COLUMN unit_price REAL")
+    except SQLAlchemyError:
+        pass
+    conn.commit()
+    conn.close()
+
+ensure_expenses_fuel_columns()
+
+# -------------------------
+# History tables: loans + assignments
+# -------------------------
+def init_history_tables():
+    conn = get_db_connection()
+    try:
+        conn.execute('''
+        CREATE TABLE IF NOT EXISTS loans_history (
+            id SERIAL PRIMARY KEY,
+            entity_type TEXT NOT NULL,
+            entity_id INTEGER NOT NULL,
+            monthly_amount REAL NOT NULL,
+            start_date DATE NOT NULL,
+            end_date DATE,
+            note TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        '''))
+        conn.execute('''
+        CREATE TABLE IF NOT EXISTS trailer_truck_history (
+            id SERIAL PRIMARY KEY,
+            trailer_id INTEGER NOT NULL,
+            old_truck_id INTEGER,
+            new_truck_id INTEGER,
+            start_date DATE NOT NULL,
+            end_date DATE,
+            note TEXT,
+            truck_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        '''))
+        conn.execute('''
+        CREATE TABLE IF NOT EXISTS driver_assignment_history (
+            id SERIAL PRIMARY KEY,
+            driver_id INTEGER NOT NULL,
+            truck_id INTEGER,
+            trailer_id INTEGER,
+            start_date DATE NOT NULL,
+            end_date DATE,
+            note TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        '''))
+    finally:
+        conn.close()
+
 def migrate_trailer_history_add_truck_id(conn):
     """
-    Ensures trailer_truck_history has a truck_id column, backfills it for ongoing
-    and recently-ended rows using trailers.truck_id, and adds useful indexes.
-    Safe to call multiple times.
+    Ensures trailer_truck_history has a truck_id column, backfills it, and adds indexes.
     """
     cur = conn.cursor()
-
-    # Check existing columns
-    cur.execute("PRAGMA table_info(trailer_truck_history);")
+    # PostgreSQL: PRAGMA not needed
     cols = [r[1] for r in cur.fetchall()]
-
-    # 1) Add truck_id column if missing
     if "truck_id" not in cols:
         cur.execute("ALTER TABLE trailer_truck_history ADD COLUMN truck_id INTEGER;")
-
-    # 2) Backfill for ongoing assignments: use current trailers.truck_id
     cur.execute("""
         UPDATE trailer_truck_history AS h
         SET truck_id = (
-            SELECT trl.truck_id
-            FROM trailers trl
-            WHERE trl.trailer_id = h.trailer_id
+            SELECT trl.truck_id FROM trailers trl WHERE trl.trailer_id = h.trailer_id
         )
         WHERE h.truck_id IS NULL
-          AND (h.end_date IS NULL OR h.end_date = '' OR DATE(h.end_date) > DATE('now'))
-          AND EXISTS (
-              SELECT 1 FROM trailers trl WHERE trl.trailer_id = h.trailer_id AND trl.truck_id IS NOT NULL
-          );
+          AND (h.end_date IS NULL OR h.end_date = '' OR DATE(h.end_date) > CURRENT_DATE)
+          AND EXISTS (SELECT 1 FROM trailers trl WHERE trl.trailer_id = h.trailer_id AND trl.truck_id IS NOT NULL);
     """)
-
-    # 3) Heuristic backfill for rows that ended within last 7 days (optional)
-    cur.execute("""
-        UPDATE trailer_truck_history AS h
-        SET truck_id = (
-            SELECT trl.truck_id
-            FROM trailers trl
-            WHERE trl.trailer_id = h.trailer_id
-        )
-        WHERE h.truck_id IS NULL
-          AND h.end_date IS NOT NULL
-          AND h.end_date <> ''
-          AND (julianday(DATE('now')) - julianday(h.end_date)) BETWEEN 0 AND 7
-          AND EXISTS (
-              SELECT 1 FROM trailers trl WHERE trl.trailer_id = h.trailer_id AND trl.truck_id IS NOT NULL
-          );
-    """)
-
-    # 4) Indexes
     cur.execute("CREATE INDEX IF NOT EXISTS idx_tth_trailer_id ON trailer_truck_history(trailer_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_tth_truck_id   ON trailer_truck_history(truck_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_tth_dates      ON trailer_truck_history(start_date, end_date)")
-
     conn.commit()
 
 init_history_tables()
-
 # Run one-time migration: add truck_id to trailer history and backfill
 try:
     _conn_mig = get_db_connection()
     migrate_trailer_history_add_truck_id(_conn_mig)
     _conn_mig.close()
 except Exception as _mig_err:
-    # Non-fatal: show a small note in Streamlit, continue
     try:
         st.warning(f"Trailer history migration check failed: {_mig_err}")
     except Exception:
         pass
 
-# Now that DB helpers and schema exist, create default categories
+# Now that DB helpers and schema exist, create default categories and attachments/indexes
+ensure_expense_categories_table()
 ensure_default_expense_categories()
 ensure_maintenance_category()
+ensure_expenses_attachments()
 
 # -------------------------
-# Ensure trailer.truck_id column exists (safe)
-# -------------------------
-def ensure_trailer_truck_link():
-    conn = get_db_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("ALTER TABLE trailers ADD COLUMN truck_id INTEGER")
-    except sqlite3.OperationalError:
-        pass
-    conn.commit()
-    conn.close()
-
-ensure_trailer_truck_link()
-
-# -------------------------
-# Dispatchers table & mapping (new)
+# Dispatchers tables and link
 # -------------------------
 def ensure_dispatcher_tables():
     conn = get_db_connection()
-    cur = conn.cursor()
-    # dispatchers table
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS dispatchers (
-            dispatcher_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
-            phone TEXT,
-            email TEXT,
-            notes TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    # mapping table (many-to-many)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS dispatcher_trucks (
-            dispatcher_id INTEGER NOT NULL,
-            truck_id INTEGER NOT NULL,
-            PRIMARY KEY (dispatcher_id, truck_id),
-            FOREIGN KEY (dispatcher_id) REFERENCES dispatchers(dispatcher_id) ON DELETE CASCADE,
-            FOREIGN KEY (truck_id) REFERENCES trucks(truck_id) ON DELETE CASCADE
-        )
-    """)
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS dispatchers (
+                dispatcher_id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                phone TEXT,
+                email TEXT,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS dispatcher_trucks (
+                dispatcher_id INTEGER NOT NULL,
+                truck_id INTEGER NOT NULL,
+                PRIMARY KEY (dispatcher_id, truck_id)
+            )
+        """)
+    finally:
+        conn.close()
+
+def ensure_dispatcher_truck_link(dispatcher_id: int, truck_id: int):
+    with get_db_connection() as conn:
+        try:
+            conn.execute("""
+                INSERT INTO dispatcher_trucks (dispatcher_id, truck_id)
+                VALUES (:dispatcher_id, :truck_id)
+                ON CONFLICT (dispatcher_id, truck_id) DO NOTHING
+            """, {"dispatcher_id": dispatcher_id, "truck_id": truck_id})
+        except SQLAlchemyError:
+            pass
+
+ensure_dispatcher_tables()
+ensure_truck_dispatcher_link()
 
 def add_dispatcher(name, phone=None, email=None, notes=None):
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("INSERT OR IGNORE INTO dispatchers (name, phone, email, notes) VALUES (?, ?, ?, ?)",
+    conn.execute("INSERT INTO dispatchers (name, phone, email, notes) VALUES (?, ?, ?, ?)",
                 (name.strip(), phone, email, notes))
     conn.commit()
     dispatcher_id = cur.lastrowid
@@ -1386,7 +1166,7 @@ def add_dispatcher(name, phone=None, email=None, notes=None):
 def update_dispatcher(dispatcher_id, name, phone=None, email=None, notes=None):
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("UPDATE dispatchers SET name=?, phone=?, email=?, notes=? WHERE dispatcher_id=?",
+    conn.execute("UPDATE dispatchers SET name=?, phone=?, email=?, notes=? WHERE dispatcher_id=?",
                 (name.strip(), phone, email, notes, dispatcher_id))
     conn.commit()
     conn.close()
@@ -1394,15 +1174,15 @@ def update_dispatcher(dispatcher_id, name, phone=None, email=None, notes=None):
 def delete_dispatcher(dispatcher_id):
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("DELETE FROM dispatcher_trucks WHERE dispatcher_id=?", (dispatcher_id,))
-    cur.execute("DELETE FROM dispatchers WHERE dispatcher_id=?", (dispatcher_id,))
+    conn.execute("DELETE FROM dispatcher_trucks WHERE dispatcher_id=?", (dispatcher_id,))
+    conn.execute("DELETE FROM dispatchers WHERE dispatcher_id=?", (dispatcher_id,))
     conn.commit()
     conn.close()
 
 def get_all_dispatchers():
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("SELECT dispatcher_id, name, phone, email, notes, created_at FROM dispatchers ORDER BY name")
+    conn.execute("SELECT dispatcher_id, name, phone, email, notes, created_at FROM dispatchers ORDER BY name")
     rows = cur.fetchall()
     conn.close()
     return [{"dispatcher_id": r[0], "name": r[1], "phone": r[2], "email": r[3], "notes": r[4], "created_at": r[5]} for r in rows]
@@ -1410,7 +1190,7 @@ def get_all_dispatchers():
 def get_trucks_for_dispatcher(dispatcher_id):
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("SELECT truck_id FROM dispatcher_trucks WHERE dispatcher_id = ?", (dispatcher_id,))
+    conn.execute("SELECT truck_id FROM dispatcher_trucks WHERE dispatcher_id = ?", (dispatcher_id,))
     rows = cur.fetchall()
     conn.close()
     return [r[0] for r in rows]
@@ -1418,89 +1198,95 @@ def get_trucks_for_dispatcher(dispatcher_id):
 def assign_trucks_to_dispatcher(dispatcher_id, truck_id_list):
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("DELETE FROM dispatcher_trucks WHERE dispatcher_id = ?", (dispatcher_id,))
+    conn.execute("DELETE FROM dispatcher_trucks WHERE dispatcher_id = ?", (dispatcher_id,))
     for tid in set([int(t) for t in truck_id_list if t is not None]):
-        cur.execute("INSERT OR IGNORE INTO dispatcher_trucks (dispatcher_id, truck_id) VALUES (?, ?)", (dispatcher_id, tid))
+        cur.execute("INSERT INTO dispatcher_trucks (dispatcher_id, truck_id) VALUES (?, ?)", (dispatcher_id, tid))
     conn.commit()
     conn.close()
 
-# call to ensure tables exist
-ensure_dispatcher_tables()
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+
+def seed_default_dispatcher():
+    # Ensure 'name' is UNIQUE in your dispatchers table definition
+    with get_db_connection() as conn:
+        try:
+            conn.execute("""
+                INSERT INTO dispatchers (name, phone, email, notes)
+                VALUES (:name, :phone, :email, :notes)
+                ON CONFLICT (name) DO NOTHING
+            """, {
+                "name": "Default Dispatcher",
+                "phone": None,
+                "email": None,
+                "notes": "Seeded automatically"
+            })
+        except SQLAlchemyError as e:
+            # Optional: st.warning(f"Could not seed dispatcher: {e}")
+            pass
 
 # -------------------------
-# Ensure trucks has dispatcher_id column (safe)
+# Safe rerun helper
 # -------------------------
-def ensure_truck_dispatcher_link():
+def safe_rerun():
+    if hasattr(st, "experimental_rerun"):
+        try:
+            st.experimental_rerun()
+            return
+        except Exception:
+            pass
+    st.session_state["_rerun_trigger"] = not st.session_state.get("_rerun_trigger", False)
+    st.stop()
+
+# ========== Safe-delete helpers ==========
+def safe_delete_all_rows(table_name: str):
+    """
+    Deletes all rows from table_name even if another table has a bad foreign key.
+    Temporarily disables FK checks only inside this connection/transaction.
+    """
     conn = get_db_connection()
-    cur = conn.cursor()
     try:
-        cur.execute("ALTER TABLE trucks ADD COLUMN dispatcher_id INTEGER")
-    except sqlite3.OperationalError:
-        # column already exists
-        pass
-    conn.commit()
-    conn.close()
+        cur = conn.cursor()
+        conn.execute("PRAGMA foreign_keys = OFF;")
+        conn.execute(f"DELETE FROM {table_name};")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        try:
+            # PostgreSQL: PRAGMA not needed
+        except Exception:
+            pass
+        conn.close()
 
-ensure_truck_dispatcher_link()
-
-# -------------------------
-# Backup / Restore helpers
-# -------------------------
-def backup_db_file_bytes():
-    """Return binary bytes of the sqlite DB file for download"""
-    with open(DB_FILE, 'rb') as f:
-        return f.read()
-
-def export_sql_dump_bytes():
-    """Return SQL dump (utf-8 bytes) of the DB"""
-    conn = sqlite3.connect(DB_FILE)
-    dump_io = io.StringIO()
-    for line in conn.iterdump():
-        dump_io.write('%s\n' % line)
-    conn.close()
-    return dump_io.getvalue().encode('utf-8')
-
-def restore_db_from_bytes(db_bytes):
-    """Overwrite current DB file with uploaded bytes. Creates a temporary backup first."""
-    backup_name = f"{DB_FILE}.backup_before_restore_{int(datetime.utcnow().timestamp())}"
-    shutil.copyfile(DB_FILE, backup_name)
-    with open(DB_FILE, 'wb') as f:
-        f.write(db_bytes)
-    # re-run migrations to ensure new DB has necessary tables if missing
-    init_database()
-    init_history_tables()
-    ensure_dispatcher_tables()
-    ensure_truck_dispatcher_link()
-    return True
-
-# -------------------------
-# Reset helpers (full + per-table)
-# -------------------------
-def reset_database():
+def safe_delete_one(table_name: str, key_col: str, key_val):
+    """
+    Deletes one row by key. If FK blocks it, retry with FK OFF for this op.
+    """
     conn = get_db_connection()
-    cur = conn.cursor()
-    tables = ['trucks', 'trailers', 'drivers', 'expenses', 'income', 'loans_history', 'trailer_truck_history', 'driver_assignment_history', 'dispatchers', 'dispatcher_trucks']
-    for table in tables:
-        cur.execute(f'DROP TABLE IF EXISTS {table}')
-    conn.commit()
-    conn.close()
-    init_database()
-    init_history_tables()
-    ensure_dispatcher_tables()
-    ensure_truck_dispatcher_link()
+    try:
+        cur = conn.cursor()
+        try:
+            conn.execute(f"DELETE FROM {table_name} WHERE {key_col} = ?;", (key_val,))
+        except Exception:
+            conn.execute("PRAGMA foreign_keys = OFF;")
+            conn.execute(f"DELETE FROM {table_name} WHERE {key_col} = ?;", (key_val,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        try:
+            conn.execute("PRAGMA foreign_keys = ON;")
+        except Exception:
+            pass
+        conn.close()
+# ========================================
 
-def reset_table(table_name):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute(f'DELETE FROM {table_name}')
-    conn.commit()
-    conn.close()
-
-def reset_trucks(): reset_table('trucks')
-def reset_trailers(): reset_table('trailers')
-def reset_drivers(): reset_table('drivers')
-def reset_expenses(): reset_table('expenses')
-def reset_income(): reset_table('income')
+# -------------------------
+# Preset date range (already above) – kept single definition
+# -------------------------
 
 # -------------------------
 # Loan proration helpers (per-month prorating)
@@ -1547,8 +1333,6 @@ def get_loan_history(entity_type: str, entity_id: int):
     conn.close()
     result = []
     for r in rows:
-        sid = r[2]
-        eid = r[3]
         result.append({
             'id': r[0],
             'monthly_amount': float(r[1]),
@@ -1563,7 +1347,6 @@ def set_loan_history(entity_type: str, entity_id: int, monthly_amount: float, st
         start_date = date.today()
     conn = get_db_connection()
     cur = conn.cursor()
-    # close previous open record
     cur.execute("""
         SELECT id, start_date FROM loans_history
         WHERE entity_type=? AND entity_id=? AND end_date IS NULL
@@ -1574,7 +1357,6 @@ def set_loan_history(entity_type: str, entity_id: int, monthly_amount: float, st
         prev_id = prev[0]
         prev_end = start_date - timedelta(days=1)
         cur.execute("UPDATE loans_history SET end_date=? WHERE id=?", (prev_end, prev_id))
-    # insert new
     cur.execute("""
         INSERT INTO loans_history (entity_type, entity_id, monthly_amount, start_date, note)
         VALUES (?, ?, ?, ?, ?)
@@ -1584,9 +1366,7 @@ def set_loan_history(entity_type: str, entity_id: int, monthly_amount: float, st
 
 def get_prorated_loan_for_entity(entity_type: str, entity_id: int, range_start: date, range_end: date) -> float:
     rows = get_loan_history(entity_type, entity_id)
-    total = 0.0
     if not rows:
-        # fallback: read current loan_amount from table
         conn = get_db_connection()
         cur = conn.cursor()
         if entity_type == 'truck':
@@ -1597,7 +1377,7 @@ def get_prorated_loan_for_entity(entity_type: str, entity_id: int, range_start: 
         conn.close()
         monthly = float(r[0]) if r and r[0] is not None else 0.0
         return prorated_monthly_amount_for_range(monthly, range_start, range_end)
-
+    total = 0.0
     for row in rows:
         seg_start = max(range_start, row['start_date'])
         seg_end = min(range_end, row['end_date'] or range_end)
@@ -1607,20 +1387,8 @@ def get_prorated_loan_for_entity(entity_type: str, entity_id: int, range_start: 
     return total
 
 def upsert_current_loan(entity_type: str, entity_id: int, monthly_amount: float, start_date: date, end_date: date | None):
-    """
-    Maintain loans_history without losing past data:
-    - If an open row exists (end_date NULL/empty):
-        - If end_date provided: close the open row.
-        - If amount==0 and no end_date: close open row today.
-        - If start_date > existing start: close existing day before new start; insert new row from new start with new amount.
-        - If start_date == existing start: update amount only.
-        - If start_date < existing start: move start earlier and set amount.
-    - If no open row:
-        - Insert a new row if amount > 0 (with optional end_date).
-    """
     conn = get_db_connection()
     cur = conn.cursor()
-
     cur.execute("""
         SELECT id, monthly_amount, DATE(start_date) AS s, end_date
         FROM loans_history
@@ -1629,36 +1397,26 @@ def upsert_current_loan(entity_type: str, entity_id: int, monthly_amount: float,
         LIMIT 1
     """, (entity_type, entity_id))
     row = cur.fetchone()
-
     new_amt = float(monthly_amount or 0.0)
     new_s = start_date
     new_e = end_date
-
     def ds(d):
         return None if d is None else d.isoformat()
-
     today_d = date.today()
-
     if row:
         open_id, old_amt, old_s_str, old_e = row
         old_s = date.fromisoformat(old_s_str)
-
         if new_e:
-            # Close open loan at provided end_date
             cur.execute("UPDATE loans_history SET end_date = ? WHERE id = ?", (ds(new_e), open_id))
             conn.commit()
             conn.close()
             return
-
         if new_amt <= 0:
-            # End the open loan today
             cur.execute("UPDATE loans_history SET end_date = ? WHERE id = ?", (ds(today_d), open_id))
             conn.commit()
             conn.close()
             return
-
         if new_s > old_s:
-            # Split: close existing day before new start, then add new row
             end_prev = new_s - timedelta(days=1)
             cur.execute("UPDATE loans_history SET end_date = ? WHERE id = ?", (ds(end_prev), open_id))
             cur.execute("""
@@ -1668,7 +1426,6 @@ def upsert_current_loan(entity_type: str, entity_id: int, monthly_amount: float,
             conn.commit()
             conn.close()
             return
-
         if new_s == old_s:
             if float(old_amt) != new_amt:
                 cur.execute("UPDATE loans_history SET monthly_amount = ? WHERE id = ?", (new_amt, open_id))
@@ -1677,18 +1434,13 @@ def upsert_current_loan(entity_type: str, entity_id: int, monthly_amount: float,
             else:
                 conn.close()
             return
-
-        # new_s < old_s
         cur.execute("UPDATE loans_history SET start_date = ?, monthly_amount = ? WHERE id = ?", (ds(new_s), new_amt, open_id))
         conn.commit()
         conn.close()
         return
-
-    # No open row
     if new_amt <= 0:
         conn.close()
         return
-
     cur.execute("""
         INSERT INTO loans_history (entity_type, entity_id, monthly_amount, start_date, end_date)
         VALUES (?, ?, ?, ?, ?)
@@ -1752,19 +1504,19 @@ def record_driver_assignment(driver_id: int, truck_id: int=None, trailer_id: int
 # -------------------------
 def get_trucks():
     conn = get_db_connection()
-    df = pd.read_sql_query("SELECT * FROM trucks ORDER BY number", conn)
+    df = pd.read_sql_query("SELECT * FROM trucks ORDER BY number", conn.raw_connection if hasattr(conn, "raw_connection") else conn)
     conn.close()
     return df
 
 def get_trailers():
     conn = get_db_connection()
-    df = pd.read_sql_query("SELECT * FROM trailers ORDER BY number", conn)
+    df = pd.read_sql_query("SELECT * FROM trailers ORDER BY number", conn.raw_connection if hasattr(conn, "raw_connection") else conn)
     conn.close()
     return df
 
 def get_drivers():
     conn = get_db_connection()
-    df = pd.read_sql_query("SELECT * FROM drivers ORDER BY name", conn)
+    df = pd.read_sql_query("SELECT * FROM drivers ORDER BY name", conn.raw_connection if hasattr(conn, "raw_connection") else conn)
     conn.close()
     return df
 
@@ -1806,8 +1558,6 @@ def get_current_dispatcher_for_truck(conn, truck_id: int) -> str:
     """
     try:
         cur = conn.cursor()
-
-        # First: if trucks has dispatcher_id populated, prefer that
         try:
             cur.execute("""
                 SELECT d.name
@@ -1820,8 +1570,6 @@ def get_current_dispatcher_for_truck(conn, truck_id: int) -> str:
                 return r[0]
         except Exception:
             pass
-
-        # Second: fallback to dispatcher_trucks mapping (if used)
         try:
             cur.execute("""
                 SELECT d.name
@@ -1836,7 +1584,6 @@ def get_current_dispatcher_for_truck(conn, truck_id: int) -> str:
                 return r2[0]
         except Exception:
             pass
-
         return ""
     except Exception:
         return ""
@@ -1844,29 +1591,19 @@ def get_current_dispatcher_for_truck(conn, truck_id: int) -> str:
 def safe_read_sql(query, conn, params=None):
     """
     Execute a SQL query safely and return a DataFrame.
-    - Returns empty DataFrame on any error (and logs to Streamlit if available).
-    - params: optional list/tuple for parameterized queries.
+    - Returns empty DataFrame on any error.
     """
     try:
         if params is None:
-            return pd.read_sql_query(query, conn)
+            return pd.read_sql_query(query, conn.raw_connection if hasattr(conn, "raw_connection") else conn)
         else:
             return pd.read_sql_query(query, conn, params=params)
     except Exception as e:
-        # If running inside Streamlit, show a compact error
         try:
-            import streamlit as st
             st.warning(f"Query failed (handled): {e}")
         except Exception:
             pass
         return pd.DataFrame()
-
-def safe_rerun():
-    try:
-        import streamlit as st
-        st.experimental_rerun()
-    except Exception:
-        pass
 
 # -------------------------
 # Aggregated loan totals per truck (truck + linked trailers) using history
@@ -1879,12 +1616,10 @@ def get_truck_loans_in_range(start_date: date, end_date: date):
     cur.execute("SELECT trailer_id, number, truck_id FROM trailers")
     trailers = cur.fetchall()
     conn.close()
-
     trailer_map_by_truck = {}
     for trailer_id, tr_number, tr_truck_id in trailers:
         if tr_truck_id:
             trailer_map_by_truck.setdefault(tr_truck_id, []).append(trailer_id)
-
     result = {}
     for truck_id, number in trucks:
         truck_prorated = get_prorated_loan_for_entity('truck', truck_id, start_date, end_date)
@@ -1900,7 +1635,7 @@ def get_truck_loans_in_range(start_date: date, end_date: date):
     return result
 
 # -------------------------
-# Seed existing loans (one-time)
+# Seed existing loans (one-time safe)
 # -------------------------
 def seed_existing_loans_start():
     conn = get_db_connection()
@@ -1910,19 +1645,22 @@ def seed_existing_loans_start():
     for truck_id, loan in cur.fetchall():
         cur.execute("SELECT COUNT(*) FROM loans_history WHERE entity_type='truck' AND entity_id=?", (truck_id,))
         if cur.fetchone()[0] == 0:
-            cur.execute("INSERT INTO loans_history (entity_type, entity_id, monthly_amount, start_date, note) VALUES (?, ?, ?, ?, ?)",
-                        ('truck', truck_id, loan, '2000-01-01', 'seed from existing data'))
+            cur.execute("""
+                INSERT INTO loans_history (entity_type, entity_id, monthly_amount, start_date, note)
+                VALUES (?, ?, ?, ?, ?)
+            """, ('truck', truck_id, loan, '2000-01-01', 'seed from existing data'))
     # trailers
     cur.execute("SELECT trailer_id, loan_amount FROM trailers WHERE loan_amount IS NOT NULL AND loan_amount>0")
     for trailer_id, loan in cur.fetchall():
         cur.execute("SELECT COUNT(*) FROM loans_history WHERE entity_type='trailer' AND entity_id=?", (trailer_id,))
         if cur.fetchone()[0] == 0:
-            cur.execute("INSERT INTO loans_history (entity_type, entity_id, monthly_amount, start_date, note) VALUES (?, ?, ?, ?, ?)",
-                        ('trailer', trailer_id, loan, '2000-01-01', 'seed from existing data'))
+            cur.execute("""
+                INSERT INTO loans_history (entity_type, entity_id, monthly_amount, start_date, note)
+                VALUES (?, ?, ?, ?, ?)
+            """, ('trailer', trailer_id, loan, '2000-01-01', 'seed from existing data'))
     conn.commit()
     conn.close()
 
-# call seed once (safe - checks for existing entries)
 seed_existing_loans_start()
 
 # -------------------------
@@ -2123,39 +1861,40 @@ elif page == "Trucks":
     # Helper: current trailer per truck, based on trailers.truck_id
     def get_trucks_with_names_by_trailer_link():
         conn = get_db_connection()
-        df = pd.read_sql_query(
-            """
-            SELECT 
+        try:
+            sql = """
+            SELECT
                 t.truck_id,
                 t.number AS truck_number,
                 t.make,
                 t.model,
                 t.year,
-                t.plate,
                 t.vin,
+                t.plate,
                 t.status,
-                -- trailer linked by trailers.truck_id
-                tr.trailer_id,
-                tr.number AS trailer_number,
-                d.name AS driver_name,
-                disp.name AS dispatcher_name,
-                t.loan_amount,
-                t.loan_start_date,
-                t.loan_term_months,
-                t.created_at
+                t.notes,
+                d.name AS dispatcher_name,
+                tr.trailer_number AS linked_trailer_number
             FROM trucks t
-            LEFT JOIN trailers tr ON tr.truck_id = t.truck_id
-            LEFT JOIN drivers d ON t.driver_id = d.driver_id
-            LEFT JOIN dispatchers disp ON t.dispatcher_id = disp.dispatcher_id
-            ORDER BY t.number
-            """,
-            conn,
-        )
-        conn.close()
-        for col in ("trailer_number", "driver_name", "dispatcher_name"):
-            if col in df.columns:
-                df[col] = df[col].fillna("Not Assigned")
-        return df
+            LEFT JOIN truck_dispatcher_link tdl
+                   ON tdl.truck_id = t.truck_id
+                  AND (tdl.end_date IS NULL OR tdl.end_date = '')
+            LEFT JOIN dispatchers d
+                   ON d.dispatcher_id = tdl.dispatcher_id
+            LEFT JOIN trailers tr
+                   ON tr.truck_id = t.truck_id
+            ORDER BY t.truck_id DESC;
+            """
+            df = pd.read_sql_query(sql, conn.raw_connection if hasattr(conn, "raw_connection") else conn)
+            return df
+        except Exception as e:
+            import traceback
+            st.error(f"Trucks query failed: {e}")
+            st.code(sql, language="sql")
+            st.text(traceback.format_exc())
+            return pd.DataFrame()
+        finally:
+            conn.close()
 
     # Helper: list of trailers for selection
     def get_all_trailers():
@@ -2539,7 +2278,7 @@ elif page == "Trucks":
 
                         st.success("Truck added successfully!")
                         safe_rerun()
-                    except sqlite3.IntegrityError:
+                    except SQLAlchemyErrorIntegrityError:
                         st.error("Truck number already exists.")
 
 # -------------------------
@@ -2842,7 +2581,7 @@ elif page == "Trailers":
 
                         st.success("Trailer added successfully!")
                         safe_rerun()
-                    except sqlite3.IntegrityError:
+                    except SQLAlchemyErrorIntegrityError:
                         st.error("Trailer number already exists.")
 
 # -------------------------
@@ -2866,7 +2605,7 @@ elif page == "Drivers":
                         st.session_state.editing_driver = selected_driver
                 with col2:
                     if st.button("🗑️ Delete Driver", key="delete_driver"):
-                        delete_record("drivers", "driver_id", selected_driver)
+                        safe_delete_one("drivers", "driver_id", selected_driver)
                         st.success("Driver deleted successfully!")
                         safe_rerun()
                 if st.session_state.get('editing_driver') == selected_driver:
@@ -2875,7 +2614,10 @@ elif page == "Drivers":
                         new_license = st.text_input("License Number", value=driver_data['license_number'] or "")
                         new_phone = st.text_input("Phone", value=driver_data['phone'] or "")
                         new_email = st.text_input("Email", value=driver_data['email'] or "")
-                        new_hire_date = st.date_input("Hire Date", value=datetime.strptime(driver_data['hire_date'], '%Y-%m-%d').date() if driver_data['hire_date'] else date.today())
+                        new_hire_date = st.date_input(
+                            "Hire Date",
+                            value=to_date(driver_data.get('hire_date')) or date.today()
+                        )
                         new_status = st.selectbox("Status", ["Active", "Inactive"], index=["Active", "Inactive"].index(driver_data['status']) if driver_data['status'] in ["Active", "Inactive"] else 0)
                         col1, col2 = st.columns(2)
                         with col1:
@@ -3010,8 +2752,8 @@ elif page == "Expenses":
     # Top metrics (selected range + YTD)
     conn_tot = get_db_connection()
     try:
-        df_range = pd.read_sql_query("SELECT amount FROM expenses WHERE date BETWEEN ? AND ?", conn_tot, params=(start_date, end_date))
-        df_ytd = pd.read_sql_query("SELECT amount FROM expenses WHERE date BETWEEN ? AND ?", conn_tot, params=(date(date.today().year, 1, 1), date.today()))
+        df_range = pd.read_sql_query("SELECT amount FROM expenses WHERE DATE(date) BETWEEN DATE(?) AND DATE(?)", conn_tot, params=(start_date, end_date))
+        df_ytd = pd.read_sql_query("SELECT amount FROM expenses WHERE DATE(date) BETWEEN DATE(?) AND DATE(?)", conn_tot, params=(date(date.today().year, 1, 1), date.today()))
     finally:
         conn_tot.close()
     total_range = df_range['amount'].sum() if not df_range.empty else 0.0
@@ -3092,7 +2834,7 @@ elif page == "Expenses":
             if cat_name == "Fuel":
                 ad_gallons = st.number_input("Gallons", min_value=0.0, value=0.0, step=0.1)
             
-            ad_apply = st.selectbox("Apply mode", ["individual", "divide", "exclude"], index=["individual", "divide", "exclude"].index(cat.get("default_apply_mode", "individual")))
+            ad_apply = st.selectbox("Apply mode", ["individual", "divide", "exclude"], index=["individual", "divide", "exclude"].index(cat.get("default_apply_mode", "individual")
 
             # Divide state keys
             sess_key_all = f"divide_all_trucks__{cat_name}"
@@ -3280,7 +3022,7 @@ elif page == "Expenses":
         st.markdown(f"### {current_tab}")
 
         # Build query
-        query = "SELECT * FROM expenses WHERE date BETWEEN ? AND ?"
+        query = "SELECT * FROM expenses WHERE DATE(date) BETWEEN DATE(?) AND DATE(?)"
         params = [start_date, end_date]
         if filter_cat:
             query += " AND category = ?"
@@ -3482,7 +3224,7 @@ elif page == "Expenses":
                         ed_truck_id = None if ed_truck_label == "[None]" else truck_id_map.get(ed_truck_label)
                         
                         ed_apply = st.selectbox("Apply mode", ["individual", "divide", "exclude"],
-                                               index=["individual", "divide", "exclude"].index(row.get("apply_mode", "individual")))
+                                               index=["individual", "divide", "exclude"].index(row.get("apply_mode", "individual")
 
                         # Metadata
                         cat_obj = category_by_name.get(ed_category)
@@ -5594,7 +5336,7 @@ elif page == "Settings":
             try:
                 test_conn = sqlite3.connect(live_db)
                 cur = test_conn.cursor()
-                cur.execute("PRAGMA integrity_check;")
+                # PostgreSQL: PRAGMA not needed
                 result = cur.fetchone()
                 cur.close()
                 test_conn.close()
@@ -5913,7 +5655,7 @@ elif page == "👥 User Management":
                 SELECT * FROM session_logs
                 ORDER BY timestamp DESC
                 LIMIT 100
-            """, conn)
+            """, conn.raw_connection if hasattr(conn, "raw_connection") else conn)
         else:
             logs_df = pd.read_sql_query("""
                 SELECT * FROM session_logs
@@ -6607,7 +6349,7 @@ elif page == "Reports":
             date(date, 'weekday 0', '-6 days') as week_start,
             SUM(amount) as total_income
         FROM income
-        WHERE date BETWEEN ? AND ?
+        WHERE DATE(date) BETWEEN DATE(?) AND DATE(?)
         GROUP BY week
         ORDER BY week
     """, conn_charts, params=(chart_start_date, chart_end_date))
@@ -6619,7 +6361,7 @@ elif page == "Reports":
             date(date, 'weekday 0', '-6 days') as week_start,
             SUM(amount) as total_expense
         FROM expenses
-        WHERE date BETWEEN ? AND ?
+        WHERE DATE(date) BETWEEN DATE(?) AND DATE(?)
         GROUP BY week
         ORDER BY week
     """, conn_charts, params=(chart_start_date, chart_end_date))
@@ -6647,7 +6389,7 @@ elif page == "Reports":
             SUM(amount) as total_income,
             SUM(COALESCE(loaded_miles, 0) + COALESCE(empty_miles, 0)) as total_miles
         FROM income
-        WHERE date BETWEEN ? AND ?
+        WHERE DATE(date) BETWEEN DATE(?) AND DATE(?)
         GROUP BY week
         ORDER BY week
     """, conn_charts, params=(chart_start_date, chart_end_date))
@@ -6658,18 +6400,25 @@ elif page == "Reports":
         axis=1
     )
 
-    # Get weekly fuel data (total and by truck)
+    # Get weekly fuel data (total and by truck) – robust to missing columns/values
     df_fuel_weekly = pd.read_sql_query("""
         SELECT
-            strftime('%Y-%W', e.date) as week,
-            date(e.date, 'weekday 0', '-6 days') as week_start,
+            strftime('%Y-%W', e.date) AS week,
+            DATE(e.date, 'weekday 0', '-6 days') AS week_start,
             e.truck_id,
-            CAST(e.truck_id AS TEXT) as truck_number,
-            SUM(CASE WHEN e.category = 'Fuel' THEN e.gallons ELSE 0 END) as total_gallons
+            t.number AS truck_number,
+            SUM(
+                CASE
+                    WHEN LOWER(COALESCE(e.category, '')) LIKE '%fuel%'
+                    THEN COALESCE(e.gallons, CAST(json_extract(e.metadata, '$.gallons') AS REAL))
+                    ELSE 0
+                END
+            ) AS total_gallons
         FROM expenses e
+        LEFT JOIN trucks t ON t.truck_id = e.truck_id
         WHERE e.date BETWEEN ? AND ?
-        GROUP BY week, e.truck_id
-        ORDER BY week, e.truck_id
+        GROUP BY week, week_start, e.truck_id, t.number
+        ORDER BY week_start, e.truck_id
     """, conn_charts, params=(chart_start_date, chart_end_date))
 
     # Get weekly miles by truck
@@ -6680,7 +6429,7 @@ elif page == "Reports":
             truck_id,
             SUM(COALESCE(loaded_miles, 0) + COALESCE(empty_miles, 0)) as total_miles
         FROM income
-        WHERE date BETWEEN ? AND ?
+        WHERE DATE(date) BETWEEN DATE(?) AND DATE(?)
         GROUP BY week, truck_id
         ORDER BY week, truck_id
     """, conn_charts, params=(chart_start_date, chart_end_date))
@@ -7144,21 +6893,22 @@ elif page == "Reports":
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown("---")
+    # =========================
+    # 💰 Total Cost Per Mile by Truck
+    # =========================
     st.markdown("### 💰 Total Cost Per Mile by Truck")
     st.caption("Comprehensive cost analysis including all expense categories")
 
-    # Date range for cost per mile report
     cpm_col1, cpm_col2 = st.columns(2)
     with cpm_col1:
         cpm_start = st.date_input("CPM Report Start Date", value=date.today().replace(month=1, day=1), key="cpm_start")
     with cpm_col2:
-        cpm_end = st.date_input("CPM Report End Date", value=date.today(), key="cpm_end")
+        cpm_end   = st.date_input("CPM Report End Date", value=date.today(), key="cpm_end")
 
     if cpm_start > cpm_end:
         st.error("Start date must be before end date.")
     else:
-        # 1) Ensure df_miles exists FIRST
+        # 1) Miles aggregation (income table) — CHECK COLUMN NAMES IF DIFFERENT
         conn_miles = get_db_connection()
         try:
             df_miles = safe_read_sql(
@@ -7166,7 +6916,7 @@ elif page == "Reports":
                 SELECT
                     i.truck_id,
                     COALESCE(SUM(i.loaded_miles), 0) AS total_loaded_miles,
-                    COALESCE(SUM(i.empty_miles), 0) AS total_empty_miles
+                    COALESCE(SUM(i.empty_miles), 0)  AS total_empty_miles
                 FROM income i
                 WHERE i.date >= ? AND i.date <= ?
                 GROUP BY i.truck_id
@@ -7176,9 +6926,9 @@ elif page == "Reports":
             )
         finally:
             conn_miles.close()
+
         if df_miles is None or df_miles.empty:
             df_miles = pd.DataFrame(columns=['truck_id', 'total_loaded_miles', 'total_empty_miles'])
-        # Add total_miles and coerce numerics
         for c in ['total_loaded_miles', 'total_empty_miles']:
             if c in df_miles.columns:
                 df_miles[c] = pd.to_numeric(df_miles[c], errors='coerce').fillna(0.0)
@@ -7186,8 +6936,31 @@ elif page == "Reports":
                 df_miles[c] = 0.0
         df_miles['total_miles'] = df_miles['total_loaded_miles'] + df_miles['total_empty_miles']
 
-        # 2) Build your expenses by category, then pivot -> df_pivot
-        # df_expenses_by_cat = <your query here>
+        # 2) Expenses by category in range -> df_expenses_by_cat (expenses table)
+        conn_exp = get_db_connection()
+        try:
+            df_expenses_by_cat = safe_read_sql(
+                """
+                SELECT
+                    e.truck_id,
+                    t.number AS truck_number,
+                    COALESCE(e.category, 'Uncategorized') AS category,
+                    SUM(e.amount) AS category_total
+                FROM expenses e
+                LEFT JOIN trucks t ON t.truck_id = e.truck_id
+                WHERE e.date >= ? AND e.date <= ?
+                GROUP BY e.truck_id, t.number, e.category
+                """,
+                conn_exp,
+                params=(cpm_start, cpm_end)
+            )
+        finally:
+            conn_exp.close()
+
+        if df_expenses_by_cat is None or df_expenses_by_cat.empty:
+            df_expenses_by_cat = pd.DataFrame(columns=['truck_id', 'truck_number', 'category', 'category_total'])
+
+        # 3) Pivot expenses -> df_pivot
         df_pivot = df_expenses_by_cat.pivot_table(
             index=['truck_id', 'truck_number'],
             columns='category',
@@ -7196,7 +6969,7 @@ elif page == "Reports":
             aggfunc='sum'
         ).reset_index()
 
-        # 3) All trucks
+        # 4) All trucks -> ensure trucks with no activity appear
         conn_cpm_all = get_db_connection()
         try:
             df_trucks_all = safe_read_sql(
@@ -7205,10 +6978,10 @@ elif page == "Reports":
             )
         finally:
             conn_cpm_all.close()
-        if df_trucks_all is None:
+        if df_trucks_all is None or df_trucks_all.empty:
             df_trucks_all = pd.DataFrame(columns=["truck_id", "truck_number"])
 
-        # 4) Merge expenses into df_base (left on truck_id), keep single truck_number
+        # 5) Merge expenses into df_base
         df_base = df_trucks_all.merge(
             df_pivot.drop(columns=[c for c in ['truck_number'] if c in df_pivot.columns]),
             on='truck_id', how='left'
@@ -7219,7 +6992,7 @@ elif page == "Reports":
             df_base = df_base.drop(columns=['truck_number_y'])
         df_base['truck_number'] = df_base['truck_number'].fillna('Unknown')
 
-        # 5) NOW merge miles into df_base
+        # 6) Merge miles into df_base
         df_base = df_base.merge(
             df_miles[['truck_id', 'total_miles', 'total_loaded_miles', 'total_empty_miles']],
             on='truck_id', how='left'
@@ -7230,132 +7003,110 @@ elif page == "Reports":
             else:
                 df_base[c] = 0.0
 
-        # Attach prorated loans (truck-level, includes trailer loans)
-        loans_for_cpm = (
-            loans_df[['truck_id', 'loan_amount']].copy()
-            if 'loans_df' in globals() and loans_df is not None else
-            pd.DataFrame(columns=['truck_id', 'loan_amount'])
-        )
-        if loans_for_cpm.empty:
+        # 7) Loans (truck + linked trailer loans, prorated for range)
+        # If you already build `loans_df` elsewhere, keep that. Otherwise compute here:
+        def compute_loans_df(start_d, end_d):
+            # Build per-truck prorated loan totals including linked trailers
+            loans_map = get_truck_loans_in_range(start_d, end_d)  # returns keyed by truck number
+            if not loans_map:
+                return pd.DataFrame(columns=['truck_id', 'loan_amount'])
+            rows = []
+            # Need truck_id -> truck_number map:
+            conn_l = get_db_connection()
+            try:
+                df_trk = safe_read_sql("SELECT truck_id, number AS truck_number FROM trucks", conn_l)
+            finally:
+                conn_l.close()
+            id_by_number = {}
+            if df_trk is not None and not df_trk.empty:
+                id_by_number = {str(r['truck_number']): int(r['truck_id']) for _, r in df_trk.iterrows()}
+            for tr_number, val in loans_map.items():
+                tid = id_by_number.get(str(tr_number))
+                if tid is None:
+                    continue
+                rows.append({'truck_id': tid, 'loan_amount': float(val.get('total_loan', 0.0))})
+            return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['truck_id', 'loan_amount'])
+
+        if 'loans_df' in globals() and isinstance(loans_df, pd.DataFrame) and not loans_df.empty:
+            loans_for_cpm = loans_df[['truck_id', 'loan_amount']].copy()
+        else:
+            loans_for_cpm = compute_loans_df(cpm_start, cpm_end)
+
+        if loans_for_cpm is None or loans_for_cpm.empty:
             loans_for_cpm = pd.DataFrame(columns=['truck_id', 'loan_amount'])
 
         df_base = df_base.merge(loans_for_cpm, on='truck_id', how='left')
         df_base['loan_amount'] = pd.to_numeric(df_base['loan_amount'], errors='coerce').fillna(0.0)
 
-        # Category columns present (everything but ids/labels/totals)
+        # 8) Totals and CPM
         protected_cols = {
             'truck_id', 'truck_number', 'total_miles',
             'total_loaded_miles', 'total_empty_miles', 'loan_amount'
         }
         category_columns = [col for col in df_base.columns if col not in protected_cols]
-
-        # Coerce categories to numeric
         for cat in category_columns:
             df_base[cat] = pd.to_numeric(df_base[cat], errors='coerce').fillna(0.0)
 
-        # Total expenses = sum(categories) + loans
         df_base['total_expenses'] = df_base[category_columns].sum(axis=1) + df_base['loan_amount']
-
-        # Raw CPM (numeric); keep NaN when miles == 0. We will display "N/A".
         df_base['cost_per_mile_raw'] = df_base.apply(
             lambda row: (row['total_expenses'] / row['total_miles']) if row['total_miles'] > 0 else float('nan'),
             axis=1
         )
 
-        # Per-category CPMs: use 0.0 when miles == 0 (you can switch to NaN if you prefer "N/A" there too)
-        for cat in category_columns:
-            df_base[f'{cat}_cpm'] = df_base.apply(
-                lambda row: round(row[cat] / row['total_miles'], 2) if row['total_miles'] > 0 else 0.0,
-                axis=1
-            )
-
-        # Display summary metrics
+        # 9) Display
         st.markdown("#### Fleet Summary")
         metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
-
         with metric_col1:
-            total_expenses_all = df_base['total_expenses'].sum()
-            st.metric("Total Expenses", f"${total_expenses_all:,.2f}")
-
+            st.metric("Total Expenses", f"${df_base['total_expenses'].sum():,.2f}")
         with metric_col2:
-            total_miles_all = df_base['total_miles'].sum()
-            st.metric("Total Miles", f"{total_miles_all:,.0f}")
-
+            st.metric("Total Miles", f"{df_base['total_miles'].sum():,.0f}")
         with metric_col3:
-            fleet_cpm = round(total_expenses_all / total_miles_all, 2) if total_miles_all > 0 else 0
-            st.metric("Fleet Avg Cost/Mile", f"${fleet_cpm}")
-
+            fleet_miles = df_base['total_miles'].sum()
+            fleet_cpm = (df_base['total_expenses'].sum() / fleet_miles) if fleet_miles > 0 else 0
+            st.metric("Fleet Avg Cost/Mile", f"${fleet_cpm:.2f}")
         with metric_col4:
-            trucks_with_miles = df_base[df_base['total_miles'] > 0]
-            avg_truck_cpm = trucks_with_miles['cost_per_mile_raw'].mean()
+            avg_truck_cpm = df_base[df_base['total_miles'] > 0]['cost_per_mile_raw'].mean()
             st.metric("Avg Truck Cost/Mile", f"${(0 if pd.isna(avg_truck_cpm) else avg_truck_cpm):.2f}")
 
-        # Display detailed breakdown by truck
         st.markdown("#### Cost Breakdown by Truck")
-
         display_cpm = df_base.copy()
-        display_cpm['truck_number'] = display_cpm['truck_number'].fillna('Unknown')
 
-        # Money formatting for categories
-        for cat in category_columns:
-            display_cpm[cat] = display_cpm[cat].apply(lambda x: f"${x:,.2f}")
-
+        # Format numbers for display
         display_cpm['total_expenses'] = display_cpm['total_expenses'].apply(lambda x: f"${x:,.2f}")
-        display_cpm['total_miles'] = display_cpm['total_miles'].apply(lambda x: f"{x:,.0f}")
+        display_cpm['total_miles']    = display_cpm['total_miles'].apply(lambda x: f"{x:,.0f}")
+        display_cpm['cost_per_mile']  = display_cpm['cost_per_mile_raw'].apply(lambda v: "N/A" if pd.isna(v) else f"${v:.2f}")
 
-        # Human-friendly Cost/Mile: "N/A" when no miles
-        display_cpm['cost_per_mile'] = display_cpm['cost_per_mile_raw'].apply(
-            lambda v: "N/A" if pd.isna(v) else f"${v:.2f}"
-        )
+        # Normalize truck identifier in case it ended up as index or different name
+        if display_cpm.index.name == 'truck_number' and 'truck_number' not in display_cpm.columns:
+            display_cpm = display_cpm.reset_index()
 
-        # Select columns to display
-        display_columns = ['truck_number', 'total_expenses', 'total_miles', 'cost_per_mile'] + category_columns
-        display_cpm_table = display_cpm[display_columns]
+        # If it exists under an alternate name, normalize it
+        for alt in ['truck_number', 'truck', 'Truck', 'unit_number', 'unit', 'tractor_number']:
+            if alt in display_cpm.columns:
+                display_cpm = display_cpm.rename(columns={alt: 'Truck'}) if alt != 'Truck' else display_cpm
+                break
 
-        # Rename columns for better readability
-        column_rename = {
-            'truck_number': 'Truck',
-            'total_expenses': 'Total Expenses',
-            'total_miles': 'Total Miles',
-            'cost_per_mile': 'Cost/Mile'
-        }
-        display_cpm_table = display_cpm_table.rename(columns=column_rename)
+        # Use 'Truck' in the display columns (since we renamed it for presentation)
+        display_columns = ['Truck', 'total_expenses', 'total_miles', 'cost_per_mile'] + category_columns
+
+        # Build safely to avoid KeyErrors if a category column is missing
+        existing_cols = [c for c in display_columns if c in display_cpm.columns]
+        display_cpm_table = display_cpm.reindex(columns=existing_cols)
 
         st.dataframe(display_cpm_table, use_container_width=True, hide_index=True)
 
-        # Category breakdown table
-        st.markdown("#### Cost Per Mile by Category")
-
-        cpm_by_category = df_base.copy()
-        cpm_by_category['truck_number'] = cpm_by_category['truck_number'].fillna('Unknown')
-
-        cpm_columns = ['truck_number'] + [f'{cat}_cpm' for cat in category_columns]
-        cpm_by_category_table = cpm_by_category[cpm_columns]
-
-        for col in [f'{cat}_cpm' for cat in category_columns]:
-            cpm_by_category_table[col] = cpm_by_category_table[col].apply(lambda x: f"${x:.2f}")
-
-        cpm_rename = {'truck_number': 'Truck'}
-        for cat in category_columns:
-            cpm_rename[f'{cat}_cpm'] = f'{cat} $/mi'
-
-        cpm_by_category_table = cpm_by_category_table.rename(columns=cpm_rename)
-
-        st.dataframe(cpm_by_category_table, use_container_width=True, hide_index=True)
-
-        # Visualizations
         st.markdown("#### Cost Per Mile Visualizations")
         viz_option = st.selectbox(
             "Select Visualization",
-            ["Total Cost/Mile by Truck", "Expense Category Distribution", "Category Cost/Mile Comparison", "Miles vs Expenses"],
+            ["Total Cost/Mile by Truck", "Expense Category Distribution", "Miles vs Expenses"],
             key="cpm_viz_option"
         )
 
         if viz_option == "Total Cost/Mile by Truck":
-            df_chart = df_base.copy()
-            df_chart['truck_number'] = df_chart['truck_number'].fillna('Unknown')
-            # exclude trucks with 0 miles (undefined CPM)
-            df_chart = df_chart[df_chart['total_miles'] > 0]
+            df_chart = df_base[df_base['total_miles'] > 0].copy()
+            # if truck_number landed in the index, bring it out
+            if df_chart.index.name == 'truck_number' and 'truck_number' not in df_chart.columns:
+                df_chart = df_chart.reset_index()
             fig = px.bar(
                 df_chart,
                 x='truck_number',
@@ -7368,92 +7119,56 @@ elif page == "Reports":
             st.plotly_chart(fig, use_container_width=True)
 
         elif viz_option == "Expense Category Distribution":
-            df_chart = df_base.copy()
-            df_chart['truck_number'] = df_chart['truck_number'].fillna('Unknown')
-
+            # Build category breakdown safely even if some category columns are missing
             category_data = []
-            for _, row in df_chart.iterrows():
-                for cat in category_columns:
-                    category_data.append({
-                        'Truck': row['truck_number'],
-                        'Category': cat,
-                        'Amount': row[cat]
-                    })
-            df_category_stack = pd.DataFrame(category_data)
+            categories_present = [c for c in category_columns if c in df_base.columns]
 
-            fig = px.bar(
-                df_category_stack,
-                x='Truck',
-                y='Amount',
-                color='Category',
-                title='Expense Distribution by Category and Truck',
-                labels={'Amount': 'Total Expenses ($)'},
-                barmode='stack'
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            # If no categories present, show friendly message and skip chart
+            if not categories_present:
+                st.info("No expense categories available to chart for this date range.")
+            else:
+                for _, row in df_base.iterrows():
+                    truck_label = row.get('truck_number', None)
+                    # Normalize to string for Plotly
+                    truck_label = "Unknown" if truck_label is None or (isinstance(truck_label, float) and pd.isna(truck_label)) else str(truck_label)
+                    for cat in categories_present:
+                        amt = row.get(cat, 0.0)
+                        # Coerce to number and skip zeros/NaNs to avoid empty series
+                        try:
+                            amt = float(amt)
+                        except Exception:
+                            amt = 0.0
+                        if amt and not pd.isna(amt):
+                            category_data.append({'Truck': truck_label, 'Category': str(cat), 'Amount': amt})
 
-        elif viz_option == "Category Cost/Mile Comparison":
-            df_chart = df_base.copy()
-            df_chart['truck_number'] = df_chart['truck_number'].fillna('Unknown')
-            # Only meaningful where miles > 0
-            df_chart = df_chart[df_chart['total_miles'] > 0]
+                df_cat_chart = pd.DataFrame(category_data)
 
-            cpm_data = []
-            for _, row in df_chart.iterrows():
-                for cat in category_columns:
-                    cpm_data.append({
-                        'Truck': row['truck_number'],
-                        'Category': cat,
-                        'Cost_per_Mile': row[f'{cat}_cpm']
-                    })
-            df_cpm_grouped = pd.DataFrame(cpm_data)
+                if df_cat_chart.empty or df_cat_chart['Amount'].sum() == 0:
+                    st.info("No non-zero category expenses to display for this date range.")
+                else:
+                    # Ensure columns exist and are of correct types
+                    df_cat_chart['Truck'] = df_cat_chart['Truck'].astype(str)
+                    df_cat_chart['Category'] = df_cat_chart['Category'].astype(str)
+                    df_cat_chart['Amount'] = pd.to_numeric(df_cat_chart['Amount'], errors='coerce').fillna(0.0)
 
-            fig = px.bar(
-                df_cpm_grouped,
-                x='Truck',
-                y='Cost_per_Mile',
-                color='Category',
-                title='Cost Per Mile by Category and Truck',
-                labels={'Cost_per_Mile': 'Cost per Mile ($)'},
-                barmode='group'
-            )
-            st.plotly_chart(fig, use_container_width=True)
+                    fig = px.bar(
+                        df_cat_chart,
+                        x='Truck',
+                        y='Amount',
+                        color='Category',
+                        title='Expense Distribution by Category and Truck',
+                        labels={'Amount': 'Total Expenses ($)'},
+                        barmode='stack'
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
 
-        elif viz_option == "Miles vs Expenses":
-            df_chart = df_base.copy()
-            df_chart['truck_number'] = df_chart['truck_number'].fillna('Unknown')
-
-            fig = px.scatter(
-                df_chart,
-                x='total_miles',
-                y='total_expenses',
-                size=df_chart['cost_per_mile_raw'].fillna(0),  # bubble=0 for trucks with N/A CPM
-                color='truck_number',
-                title='Total Miles vs Total Expenses by Truck',
-                labels={
-                    'total_miles': 'Total Miles',
-                    'total_expenses': 'Total Expenses ($)',
-                    'truck_number': 'Truck'
-                },
-                hover_data=['truck_number']
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-        # Export functionality (export raw numbers including loans and zero miles)
+        # Exports
         st.markdown("#### Export Cost Per Mile Report")
         export_col1, export_col2 = st.columns(2)
-
         with export_col1:
             if st.button("📥 Export to CSV", key="export_cpm_csv"):
-                export_df = df_base.copy()
-                csv = export_df.to_csv(index=False)
-                st.download_button(
-                    "Download CSV",
-                    csv,
-                    f"cost_per_mile_{cpm_start}_{cpm_end}.csv",
-                    "text/csv"
-                )
-
+                csv = df_base.to_csv(index=False)
+                st.download_button("Download CSV", csv, f"cost_per_mile_{cpm_start}_{cpm_end}.csv", "text/csv")
         with export_col2:
             if st.button("📥 Export to Excel", key="export_cpm_excel"):
                 output = io.BytesIO()
@@ -7461,11 +7176,8 @@ elif page == "Reports":
                     df_base.to_excel(writer, index=False, sheet_name='Cost Per Mile Summary')
                     df_expenses_by_cat.to_excel(writer, index=False, sheet_name='Expenses by Category')
                     df_miles.to_excel(writer, index=False, sheet_name='Miles Data')
-                st.download_button(
-                    "Download Excel",
-                    output.getvalue(),
-                    f"cost_per_mile_{cpm_start}_{cpm_end}.xlsx",
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+                st.download_button("Download Excel", output.getvalue(),
+                                   f"cost_per_mile_{cpm_start}_{cpm_end}.xlsx",
+                                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-st.markdown("----\nFleet Management System © 2025")
+st.markdown("----\nFleet Management System © 2025")# Fleet Management System App (Streamlit)\n\n# [FULL CODE INCLUDED HERE – copy from above assistant message]\n
