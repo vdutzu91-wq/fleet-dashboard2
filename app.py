@@ -1043,7 +1043,7 @@ def init_history_tables():
             note TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-        '''))
+        ''')
         conn.execute('''
         CREATE TABLE IF NOT EXISTS trailer_truck_history (
             id SERIAL PRIMARY KEY,
@@ -1056,7 +1056,7 @@ def init_history_tables():
             truck_id INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-        '''))
+        ''')
         conn.execute('''
         CREATE TABLE IF NOT EXISTS driver_assignment_history (
             id SERIAL PRIMARY KEY,
@@ -1068,7 +1068,7 @@ def init_history_tables():
             note TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-        '''))
+        ''')
     finally:
         conn.close()
 
