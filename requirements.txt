@@ -1,25 +1,8 @@
-# Core Framework
-streamlit>=1.28.0
-
-# Database
-sqlalchemy>=2.0.0
-psycopg2-binary>=2.9.9
-
-# Data Processing
-pandas>=2.0.0
-numpy>=1.24.0
-
-# Visualization
-plotly>=5.17.0
-
-# HTTP Requests
-requests>=2.31.0
-
-# Excel Export
-xlsxwriter>=3.1.9
-
-# PDF Export (optional but used in code)
+streamlit
+pandas
+plotly
+reportlab
+numpy
+requests
+xlsxwriter
 openpyxl
-
-# Geolocation (used for geocoding addresses)
-geopy>=2.4.0
