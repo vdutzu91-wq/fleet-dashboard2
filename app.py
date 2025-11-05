@@ -17,6 +17,35 @@ import tempfile
 import numpy as np
 import time
 
+# Optional PDF generation with pdfkit (requires wkhtmltopdf)
+# Streamlit Cloud doesn't have wkhtmltopdf, so we make this optional
+try:
+    import pdfkit
+    # Try to detect wkhtmltopdf location based on OS
+    import platform
+    import shutil
+    
+    # Try to find wkhtmltopdf automatically
+    wkhtmltopdf_path = shutil.which('wkhtmltopdf')
+    
+    if wkhtmltopdf_path:
+        pdfkit_config = pdfkit.configuration(wkhtmltopdf=wkhtmltopdf_path)
+    elif platform.system() == 'Windows':
+        # Fallback to common Windows path
+        default_path = r"C:\Program Files\wkhtmltopdf\bin\wkhtmltopdf.exe"
+        if os.path.exists(default_path):
+            pdfkit_config = pdfkit.configuration(wkhtmltopdf=default_path)
+        else:
+            pdfkit_config = None
+    else:
+        pdfkit_config = None
+    
+    PDFKIT_AVAILABLE = pdfkit_config is not None
+except (ImportError, OSError):
+    pdfkit = None
+    pdfkit_config = None
+    PDFKIT_AVAILABLE = False
+
 # Simple role display names
 ROLE_NAMES = {
     "admin": "Administrator",
@@ -155,9 +184,15 @@ def export_to_excel(df, filename_prefix="report"):
     )
 
 def export_to_pdf_table(df, title="Report"):
-    """Exports a DataFrame to PDF using pdfkit (wkhtmltopdf backend)."""
+    """Exports a DataFrame to PDF using pdfkit (wkhtmltopdf backend) if available."""
     if df is None or df.empty:
         st.warning("No data available to export.")
+        return
+    
+    # Check if pdfkit is available
+    if not PDFKIT_AVAILABLE:
+        st.warning("⚠️ PDF export requires wkhtmltopdf to be installed. Excel export is available instead.")
+        st.info("💡 On Streamlit Cloud, PDF export is not supported. Please use Excel export.")
         return
 
     html = f"""
@@ -197,16 +232,20 @@ def export_to_pdf_table(df, title="Report"):
     </html>
     """
 
-    # Create PDF in a temporary file
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmpfile:
-        pdfkit.from_string(html, tmpfile.name, configuration=pdfkit_config)
-        tmpfile.seek(0)
-        st.download_button(
-            label=f"📄 Download {title}.pdf",
-            data=tmpfile.read(),
-            file_name=f"{title}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-            mime="application/pdf",
-        )
+    try:
+        # Create PDF in a temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmpfile:
+            pdfkit.from_string(html, tmpfile.name, configuration=pdfkit_config)
+            tmpfile.seek(0)
+            st.download_button(
+                label=f"📄 Download {title}.pdf",
+                data=tmpfile.read(),
+                file_name=f"{title}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+                mime="application/pdf",
+            )
+    except Exception as e:
+        st.error(f"❌ PDF generation failed: {str(e)}")
+        st.info("💡 Please use Excel export instead.")
 
 def export_buttons(df, base_name="report", title="Report"):
     """Render Excel + PDF export buttons side by side."""
@@ -214,11 +253,18 @@ def export_buttons(df, base_name="report", title="Report"):
         st.info("No data to export.")
         return
 
-    c1, c2 = st.columns(2)
-    with c1:
+    # If PDF is available, show both buttons side by side
+    # If not, just show Excel button
+    if PDFKIT_AVAILABLE:
+        c1, c2 = st.columns(2)
+        with c1:
+            export_to_excel(df, base_name)
+        with c2:
+            export_to_pdf_table(df, title)
+    else:
+        # Only show Excel export when PDF is not available
         export_to_excel(df, base_name)
-    with c2:
-        export_to_pdf_table(df, title)
+        st.caption("💡 PDF export is not available on Streamlit Cloud. Use Excel export instead.")
 
 DB_FILE = 'fleet_management.db'
 
