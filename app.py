@@ -17,6 +17,19 @@ import tempfile
 import numpy as np
 import time
 
+if st.button("Test PostgreSQL Connection"):
+    from db_helper import get_db_connection
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT version();")
+        version = cur.fetchone()[0]
+        st.success(f"✅ Connected! {version}")
+        cur.close()
+        conn.close()
+    except Exception as e:
+        st.error(f"❌ Failed: {e}")
+
 # Optional PDF generation with pdfkit (requires wkhtmltopdf)
 # Streamlit Cloud doesn't have wkhtmltopdf, so we make this optional
 try:
