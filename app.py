@@ -32,9 +32,6 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 import psycopg
 from datetime import datetime, date
-pdfkit_config = pdfkit.configuration(
-    wkhtmltopdf=r"C:\Program Files\wkhtmltopdf\bin\wkhtmltopdf.exe"
-)
 from datetime import date # already present above, ok
 
 COMPANY_START = date(2019, 1, 1)
