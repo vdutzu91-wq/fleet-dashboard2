@@ -13,16 +13,10 @@ import tempfile
 import traceback
 import errno
 import json
+import pdfkit
+import tempfile
 import numpy as np
 import time
-
-# ReportLab imports for PDF generation
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import letter, A4, landscape
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch
-from reportlab.lib.enums import TA_CENTER
 
 # Simple role display names
 ROLE_NAMES = {
@@ -34,7 +28,15 @@ ROLE_NAMES = {
 }
 
 from math import isfinite
+
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
+import psycopg
 from datetime import datetime, date
+pdfkit_config = pdfkit.configuration(
+    wkhtmltopdf=r"C:\Program Files\wkhtmltopdf\bin\wkhtmltopdf.exe"
+)
+from datetime import date # already present above, ok
 
 COMPANY_START = date(2019, 1, 1)
 
@@ -161,139 +163,58 @@ def export_to_excel(df, filename_prefix="report"):
     )
 
 def export_to_pdf_table(df, title="Report"):
-    """Exports a DataFrame to PDF using reportlab (pure Python, no external dependencies)."""
+    """Exports a DataFrame to PDF using pdfkit (wkhtmltopdf backend)."""
     if df is None or df.empty:
         st.warning("No data available to export.")
         return
 
-    # Create a BytesIO buffer for the PDF
-    buffer = io.BytesIO()
-    
-    # Determine page size and orientation based on number of columns
-    num_cols = len(df.columns)
-    if num_cols > 8:
-        page_size = landscape(A4)
-    else:
-        page_size = A4
-    
-    # Create the PDF document
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=page_size,
-        rightMargin=30,
-        leftMargin=30,
-        topMargin=50,
-        bottomMargin=30
-    )
-    
-    # Container for the 'Flowable' objects
-    elements = []
-    
-    # Define styles
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        'CustomTitle',
-        parent=styles['Heading1'],
-        fontSize=16,
-        textColor=colors.HexColor('#1f77b4'),
-        spaceAfter=20,
-        alignment=TA_CENTER
-    )
-    
-    # Add title
-    title_para = Paragraph(title, title_style)
-    elements.append(title_para)
-    elements.append(Spacer(1, 12))
-    
-    # Prepare table data
-    # Convert all data to strings to avoid any type issues
-    table_data = []
-    
-    # Add header row
-    header_row = [str(col) for col in df.columns]
-    table_data.append(header_row)
-    
-    # Add data rows
-    for idx, row in df.iterrows():
-        row_data = []
-        for val in row:
-            # Handle None, NaN, and other special values
-            if pd.isna(val):
-                row_data.append('')
-            elif isinstance(val, (int, float)):
-                # Format numbers nicely
-                if isinstance(val, float) and val != int(val):
-                    row_data.append(f'{val:.2f}')
-                else:
-                    row_data.append(str(int(val)))
-            else:
-                row_data.append(str(val))
-        table_data.append(row_data)
-    
-    # Calculate column widths based on page size
-    available_width = page_size[0] - 60  # Subtract margins
-    col_width = available_width / num_cols
-    
-    # Create the table
-    table = Table(table_data, colWidths=[col_width] * num_cols)
-    
-    # Style the table
-    table_style = TableStyle([
-        # Header row styling
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#f2f2f2')),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 10),
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-        
-        # Data rows styling
-        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-        ('FONTSIZE', (0, 1), (-1, -1), 8),
-        ('ALIGN', (0, 1), (-1, -1), 'CENTER'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        
-        # Borders
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-        ('BOX', (0, 0), (-1, -1), 1, colors.black),
-        
-        # Alternating row colors for better readability
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f9f9f9')]),
-    ])
-    
-    table.setStyle(table_style)
-    elements.append(table)
-    
-    # Add footer with timestamp
-    elements.append(Spacer(1, 20))
-    footer_style = ParagraphStyle(
-        'Footer',
-        parent=styles['Normal'],
-        fontSize=8,
-        textColor=colors.grey,
-        alignment=TA_CENTER
-    )
-    footer_text = f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    footer_para = Paragraph(footer_text, footer_style)
-    elements.append(footer_para)
-    
-    # Build PDF
-    try:
-        doc.build(elements)
-        buffer.seek(0)
-        
-        # Create download button
+    html = f"""
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <title>{title}</title>
+        <style>
+          body {{
+            font-family: Arial, sans-serif;
+            margin: 25px;
+          }}
+          h2 {{
+            text-align: center;
+            margin-bottom: 20px;
+          }}
+          table {{
+            border-collapse: collapse;
+            width: 100%;
+            font-size: 13px;
+          }}
+          th, td {{
+            border: 1px solid #ccc;
+            padding: 6px 10px;
+            text-align: center;
+          }}
+          th {{
+            background-color: #f2f2f2;
+            font-weight: bold;
+          }}
+        </style>
+      </head>
+      <body>
+        <h2>{title}</h2>
+        {df.to_html(index=False, justify="center")}
+      </body>
+    </html>
+    """
+
+    # Create PDF in a temporary file
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmpfile:
+        pdfkit.from_string(html, tmpfile.name, configuration=pdfkit_config)
+        tmpfile.seek(0)
         st.download_button(
             label=f"📄 Download {title}.pdf",
-            data=buffer.getvalue(),
+            data=tmpfile.read(),
             file_name=f"{title}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
             mime="application/pdf",
         )
-    except Exception as e:
-        st.error(f"Error generating PDF: {str(e)}")
-        st.error("Please try exporting to Excel instead.")
-    finally:
-        buffer.close()
 
 def export_buttons(df, base_name="report", title="Report"):
     """Render Excel + PDF export buttons side by side."""
@@ -1016,8 +937,10 @@ def init_database():
         truck_id INTEGER,
         description TEXT,
         pickup_date DATE,
+        pickup_time TEXT,
         pickup_address TEXT,
         delivery_date DATE,
+        delivery_time TEXT,
         delivery_address TEXT,
         job_reference TEXT,
         empty_miles REAL,
@@ -1091,28 +1014,151 @@ def init_database():
     conn.commit()
     conn.close()
 
+# ----
+# Database Schema Migration Functions
+# ----
+def get_table_columns_for_migration(conn, table_name):
+    """Get list of column names for a table"""
+    try:
+        cur = conn.cursor()
+        cur.execute(f"PRAGMA table_info({table_name})")
+        columns = [row[1] for row in cur.fetchall()]
+        return columns
+    except sqlite3.OperationalError:
+        return []
+
+def add_column_if_missing_migration(conn, table_name, column_name, column_type, default_value=None):
+    """
+    Add a column to a table if it doesn't exist.
+    Returns True if column was added, False if it already existed.
+    Safe to run multiple times (idempotent).
+    """
+    existing_columns = get_table_columns_for_migration(conn, table_name)
+    
+    if column_name in existing_columns:
+        return False
+    
+    # Build ALTER TABLE statement
+    alter_sql = f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"
+    if default_value is not None:
+        alter_sql += f" DEFAULT {default_value}"
+    
+    try:
+        cur = conn.cursor()
+        cur.execute(alter_sql)
+        return True
+    except sqlite3.OperationalError as e:
+        # Column might already exist (race condition or duplicate column error)
+        if "duplicate column" in str(e).lower():
+            return False
+        else:
+            # Re-raise other errors
+            raise
+
+def run_database_migrations():
+    """
+    Run all database schema migrations to add missing columns.
+    This function is idempotent - safe to run multiple times.
+    Fixes schema errors by adding missing columns to tables.
+    """
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        
+        # Enable foreign keys
+        cur.execute("PRAGMA foreign_keys = ON")
+        
+        migration_log = []
+        
+        # Income table migrations
+        if add_column_if_missing_migration(conn, "income", "pickup_time", "TIME"):
+            migration_log.append("Added income.pickup_time")
+        if add_column_if_missing_migration(conn, "income", "delivery_time", "TIME"):
+            migration_log.append("Added income.delivery_time")
+        
+        # Expenses table migrations  
+        if add_column_if_missing_migration(conn, "expenses", "gallons", "REAL", "0"):
+            migration_log.append("Added expenses.gallons")
+        
+        # Trucks table migrations
+        if add_column_if_missing_migration(conn, "trucks", "loan_start_date", "DATE"):
+            migration_log.append("Added trucks.loan_start_date")
+        if add_column_if_missing_migration(conn, "trucks", "loan_term_months", "INTEGER", "0"):
+            migration_log.append("Added trucks.loan_term_months")
+        # dispatcher_id might already be added by ensure_truck_dispatcher_link(), but safe to check
+        if add_column_if_missing_migration(conn, "trucks", "dispatcher_id", "INTEGER"):
+            migration_log.append("Added trucks.dispatcher_id")
+        
+        # Trailers table migrations
+        if add_column_if_missing_migration(conn, "trailers", "loan_start_date", "DATE"):
+            migration_log.append("Added trailers.loan_start_date")
+        if add_column_if_missing_migration(conn, "trailers", "loan_term_months", "INTEGER", "0"):
+            migration_log.append("Added trailers.loan_term_months")
+        
+        # Commit all changes
+        conn.commit()
+        conn.close()
+        
+        # Only log if changes were made (to avoid spam in production)
+        if migration_log:
+            print("=" * 60)
+            print(f"Database migration completed: {len(migration_log)} column(s) added")
+            for log_entry in migration_log:
+                print(f"  ✓ {log_entry}")
+            print("=" * 60)
+        
+        return True
+        
+    except Exception as e:
+        print(f"Database migration error: {e}")
+        try:
+            conn.rollback()
+            conn.close()
+        except:
+            pass
+        return False
+
 # call initial DB creation
 init_database()
 
-# -------------------------
-# DB connection helper (must exist before migrations that use it)
-# -------------------------
-# Absolute DB path (keep as you have)
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FILE = os.path.join(APP_DIR, "fleet_management.db")
+# Run database migrations to add missing columns
+# This is safe to run on every startup - it only adds columns that don't exist
+run_database_migrations()
 
-def get_db_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(
-        DB_FILE,
-        detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
-        check_same_thread=False,
-    )
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA foreign_keys = ON;")
-    except Exception:
-        pass
-    return conn
+# -------------------------
+# -------------------------
+# Database Connection - PostgreSQL (Neon)
+# -------------------------
+
+_db_engine = None
+
+def get_db_engine():
+    """Get or create PostgreSQL engine"""
+    global _db_engine
+    if _db_engine is None:
+        try:
+            url = st.secrets.get("DATABASE_URL", "")
+            if not url:
+                # Construct from individual components  
+                host = st.secrets.get("PGHOST", st.secrets.get("postgres_host"))
+                db = st.secrets.get("PGDATABASE", st.secrets.get("postgres_db"))
+                user = st.secrets.get("PGUSER", st.secrets.get("postgres_user"))
+                pwd = st.secrets.get("PGPASSWORD", st.secrets.get("postgres_password"))
+                url = f"postgresql+psycopg://{user}:{pwd}@{host}:5432/{db}?sslmode=require"
+            elif url.startswith("postgres://"):
+                url = url.replace("postgres://", "postgresql+psycopg://", 1)
+            
+            _db_engine = create_engine(url, pool_pre_ping=True, pool_size=5, max_overflow=10)
+        except Exception as e:
+            st.error(f"❌ Database connection failed: {e}")
+            st.info("💡 Ensure DATABASE_URL is set in Streamlit secrets")
+            st.stop()
+    return _db_engine
+
+def get_db_connection():
+    """Get database connection for queries"""
+    return get_db_engine().connect()
 
 def close_all_db_connections():
     # No-op now; kept for compatibility
@@ -1205,68 +1251,6 @@ def ensure_expenses_attachments():
         conn.commit()
     finally:
         conn.close()
-
-# -------------------------
-# Fuel expense columns migration
-# -------------------------
-def ensure_fuel_expense_columns():
-    """
-    Add separate columns for fuel expense data instead of storing in metadata JSON.
-    Columns: card_number, transaction_date, fuel_location, discount_amount, gallons
-    Safe to run multiple times on both SQLite and PostgreSQL.
-    """
-    conn = get_db_connection()
-    cur = conn.cursor()
-    
-    # List of columns to add: (column_name, data_type)
-    columns_to_add = [
-        ("card_number", "TEXT"),
-        ("transaction_date", "DATE"),
-        ("fuel_location", "TEXT"),
-        ("discount_amount", "NUMERIC DEFAULT 0"),
-        ("gallons", "NUMERIC")
-    ]
-    
-    try:
-        for col_name, col_type in columns_to_add:
-            try:
-                # Try to add column - will fail if column already exists
-                cur.execute(f"ALTER TABLE expenses ADD COLUMN {col_name} {col_type}")
-                conn.commit()
-            except Exception as e:
-                # Column likely already exists - continue with next column
-                # Handle both SQLite (OperationalError) and PostgreSQL (ProgrammingError) 
-                conn.rollback()
-                continue
-        
-        # Create indexes for performance (IF NOT EXISTS works in both SQLite and PostgreSQL)
-        try:
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_expenses_transaction_date ON expenses(transaction_date)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_expenses_discount_amount ON expenses(discount_amount)")
-            conn.commit()
-        except Exception:
-            # Index creation failed - not critical
-            conn.rollback()
-            pass
-        
-    except Exception as e:
-        # Silent fail for compatibility
-        try:
-            conn.rollback()
-        except:
-            pass
-    finally:
-        try:
-            conn.close()
-        except:
-            pass
-
-# Run fuel columns migration
-try:
-    ensure_fuel_expense_columns()
-except Exception:
-    pass
-
 
 # -------------------------
 # History tables: loans + assignment histories
@@ -3395,25 +3379,13 @@ elif page == "Expenses":
                     if cat_obj:
                         cat_schema = cat_obj.get("schema", [])
                 
-                # Build metadata display - use dedicated columns for Fuel, metadata for others
+                # Build metadata display
                 meta_display = []
-                if row.get("category") == "Fuel":
-                    # Use dedicated columns for Fuel expenses
-                    if pd.notna(row.get("card_number")):
-                        meta_display.append(f"Card Number: {row['card_number']}")
-                    if pd.notna(row.get("transaction_date")):
-                        meta_display.append(f"Transaction Date: {row['transaction_date']}")
-                    if pd.notna(row.get("fuel_location")):
-                        meta_display.append(f"Location: {row['fuel_location']}")
-                    if pd.notna(row.get("discount_amount")) and float(row.get("discount_amount", 0)) > 0:
-                        meta_display.append(f"Discount Amount: ${float(row['discount_amount']):.2f}")
-                else:
-                    # Use metadata JSON for other categories
-                    for f in cat_schema:
-                        key = f.get("key")
-                        label = f.get("label")
-                        if key in meta:
-                            meta_display.append(f"{label}: {meta[key]}")
+                for f in cat_schema:
+                    key = f.get("key")
+                    label = f.get("label")
+                    if key in meta:
+                        meta_display.append(f"{label}: {meta[key]}")
                 
                 # Attachments count
                 attachments = []
@@ -4836,23 +4808,12 @@ elif page == "Bulk Upload":
                                                     (ident, None, None, None, None, None, "Active", 0.0))
                                         truck_id = cur.lastrowid
                                         created_trucks += 1
-                                        # Update maps immediately so subsequent rows can find this truck
-                                        number_map[ident] = truck_id
-                                    elif truck_id is None and not create_missing_trucks and ident:
-                                        # Truck not found and auto-create is disabled
-                                        errors.append(f"Row {idx+1}: Truck '{row[mapping['truck_number_col']]}' not found. Enable auto-create or add truck manually.")
 
                                 # parse category-specific fields to metadata and primary amount/date
                                 metadata = {}
                                 amount_val = None
                                 date_val = None
                                 gallons_val = None
-                                
-                                # Initialize fuel-specific variables
-                                card_number_val = None
-                                transaction_date_val = None
-                                fuel_location_val = None
-                                discount_amount_val = 0.0
 
                                 if selected_category == "Fuel":
                                     # look up each mapped column
@@ -4863,22 +4824,14 @@ elif page == "Bulk Upload":
                                     discount_col = mapping.get("discount_col")
                                     gallons_col = mapping.get("gallons_col")
                                 
-                                    # Extract fuel-specific values for dedicated columns
-                                    card_number_val = row[card] if card and pd.notna(row[card]) else None
-                                    transaction_date_val = str(pd.to_datetime(row[tx_date]).date()) if tx_date and pd.notna(row[tx_date]) else None
-                                    fuel_location_val = row[location] if location and pd.notna(row[location]) else None
-                                    discount_amount_val = float(row[discount_col]) if discount_col and pd.notna(row[discount_col]) else 0.0
-                                    
-                                    amount_val = float(row[amount_col]) if amount_col and pd.notna(row[amount_col]) else 0.0
-                                    date_val = transaction_date_val
-                                    
-                                    # Keep metadata for backward compatibility (but now just as backup/reference)
                                     metadata = {
-                                        "card_number": card_number_val,
-                                        "transaction_date": transaction_date_val,
-                                        "location": fuel_location_val,
-                                        "discount_amount": discount_amount_val
+                                        "card_number": row[card] if card and pd.notna(row[card]) else None,
+                                        "transaction_date": str(pd.to_datetime(row[tx_date]).date()) if tx_date and pd.notna(row[tx_date]) else None,
+                                        "location": row[location] if location and pd.notna(row[location]) else None,
+                                        "discount_amount": float(row[discount_col]) if discount_col and pd.notna(row[discount_col]) else 0.0
                                     }
+                                    amount_val = float(row[amount_col]) if amount_col and pd.notna(row[amount_col]) else 0.0
+                                    date_val = metadata.get("transaction_date")
                                 
                                     # Parse gallons
                                     if gallons_col and pd.notna(row[gallons_col]):
@@ -4921,21 +4874,11 @@ elif page == "Bulk Upload":
                                                 pass
                                     date_val = metadata.get("date") or metadata.get("transaction_date") or metadata.get("date_occurred")
 
-                                # Insert into DB - use dedicated columns for Fuel, metadata for others
-                                if selected_category == "Fuel":
-                                    cur.execute("""
-                                        INSERT INTO expenses (date, category, amount, truck_id, description, metadata, apply_mode, gallons,
-                                                             card_number, transaction_date, fuel_location, discount_amount)
-                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                    """, (date_val, selected_category, float(amount_val or 0.0), truck_id, None, json.dumps(metadata), 
-                                         cat.get("default_apply_mode", "individual"), gallons_val,
-                                         card_number_val, transaction_date_val, fuel_location_val, discount_amount_val))
-                                else:
-                                    cur.execute("""
-                                        INSERT INTO expenses (date, category, amount, truck_id, description, metadata, apply_mode, gallons)
-                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                                    """, (date_val, selected_category, float(amount_val or 0.0), truck_id, None, json.dumps(metadata), 
-                                         cat.get("default_apply_mode", "individual"), gallons_val))
+                                # Insert into DB
+                                cur.execute("""
+                                    INSERT INTO expenses (date, category, amount, truck_id, description, metadata, apply_mode, gallons)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                """, (date_val, selected_category, float(amount_val or 0.0), truck_id, None, json.dumps(metadata), cat.get("default_apply_mode", "individual"), gallons_val))
                                 success_count += 1
 
                             except Exception as e:
@@ -6252,20 +6195,13 @@ elif page == "Reports":
                     conn_tmp,
                     params=[start_date.isoformat(), end_date.isoformat()],
                 )
-                if income_df is not None and not income_df.empty:
-                    income_df["truck_number"] = income_df["truck_id"].map(dict(zip(trucks_df.truck_id, trucks_df.number)))
-                    income_df["dispatcher_id"] = None
-                    income_df["dispatcher_name"] = None
-                else:
-                    income_df = pd.DataFrame(columns=["truck_id","truck_number","dispatcher_id","dispatcher_name","total_income"])
+                income_df["truck_number"] = income_df["truck_id"].map(dict(zip(trucks_df.truck_id, trucks_df.number)))
+                income_df["dispatcher_id"] = None
+                income_df["dispatcher_name"] = None
         else:
             income_df = pd.DataFrame(columns=["truck_id","truck_number","dispatcher_id","dispatcher_name","total_income"])
     finally:
         conn_tmp.close()
-    
-    # Ensure income_df is not None
-    if income_df is None:
-        income_df = pd.DataFrame(columns=["truck_id","truck_number","dispatcher_id","dispatcher_name","total_income"])
 
     # Expenses per truck and dispatcher by date overlap
     conn_tmp = get_db_connection()
@@ -6300,20 +6236,13 @@ elif page == "Reports":
                     conn_tmp,
                     params=[start_date.isoformat(), end_date.isoformat()],
                 )
-                if expense_df is not None and not expense_df.empty:
-                    expense_df["truck_number"] = expense_df["truck_id"].map(dict(zip(trucks_df.truck_id, trucks_df.number)))
-                    expense_df["dispatcher_id"] = None
-                    expense_df["dispatcher_name"] = None
-                else:
-                    expense_df = pd.DataFrame(columns=["truck_id","truck_number","dispatcher_id","dispatcher_name","total_expenses"])
+                expense_df["truck_number"] = expense_df["truck_id"].map(dict(zip(trucks_df.truck_id, trucks_df.number)))
+                expense_df["dispatcher_id"] = None
+                expense_df["dispatcher_name"] = None
         else:
             expense_df = pd.DataFrame(columns=["truck_id","truck_number","dispatcher_id","dispatcher_name","total_expenses"])
     finally:
         conn_tmp.close()
-    
-    # Ensure expense_df is not None
-    if expense_df is None:
-        expense_df = pd.DataFrame(columns=["truck_id","truck_number","dispatcher_id","dispatcher_name","total_expenses"])
 
     # --------------------------------------------------
     # Accurate (pro-rated) Loans per Truck using History
@@ -6461,41 +6390,21 @@ elif page == "Reports":
     common_keys = ["truck_id","truck_number","dispatcher_id","dispatcher_name"]
     summary = _merge(income_df, expense_df, on=common_keys)
 
-    # Coerce data types in loans_df to ensure compatibility for merging
-    if not loans_df.empty:
-        # Ensure truck_id is integer type
-        loans_df["truck_id"] = pd.to_numeric(loans_df["truck_id"], errors="coerce").fillna(0).astype(int)
-        # Ensure truck_number is string type and handle NaN
-        loans_df["truck_number"] = loans_df["truck_number"].astype(str).replace('nan', '').replace('None', '')
-
     # Loans are truck-level; attach to each dispatcher row for that truck
     if summary is not None and not summary.empty:
-        # Coerce data types in summary to match loans_df
-        summary["truck_id"] = pd.to_numeric(summary["truck_id"], errors="coerce").fillna(0).astype(int)
-        summary["truck_number"] = summary["truck_number"].astype(str).replace('nan', '').replace('None', '')
-        
-        # Only merge if loans_df has data
-        if not loans_df.empty:
-            loans_for_merge = summary[common_keys].drop_duplicates().merge(
-                loans_df[["truck_id","truck_number","loan_amount"]], on=["truck_id","truck_number"], how="left"
-            )
-            summary = _merge(summary, loans_for_merge, on=common_keys)
-        else:
-            # No loans data, just add empty loan_amount column
-            summary["loan_amount"] = 0.0
+        loans_for_merge = summary[["truck_id","truck_number"]].drop_duplicates().merge(
+            loans_df[["truck_id","truck_number","loan_amount"]], on=["truck_id","truck_number"], how="left"
+        )
+        loans_for_merge = summary[common_keys].drop_duplicates().merge(
+            loans_df[["truck_id","truck_number","loan_amount"]], on=["truck_id","truck_number"], how="left"
+        )
+        summary = _merge(summary, loans_for_merge, on=common_keys)
     else:
         # If no summary rows, still make a base from trucks + loans
         summary = trucks_df.rename(columns={"number":"truck_number"})[["truck_id","truck_number"]].copy()
         summary["dispatcher_id"] = None
         summary["dispatcher_name"] = None
-        # Coerce types before merge
-        summary["truck_id"] = pd.to_numeric(summary["truck_id"], errors="coerce").fillna(0).astype(int)
-        summary["truck_number"] = summary["truck_number"].astype(str).replace('nan', '').replace('None', '')
-        
-        if not loans_df.empty:
-            summary = summary.merge(loans_df[["truck_id","truck_number","loan_amount"]], on=["truck_id","truck_number"], how="left")
-        else:
-            summary["loan_amount"] = 0.0
+        summary = summary.merge(loans_df[["truck_id","truck_number","loan_amount"]], on=["truck_id","truck_number"], how="left")
 
     # Fill numeric defaults
     for c in ["total_income","total_expenses","loan_amount"]:
@@ -6677,7 +6586,7 @@ elif page == "Reports":
         export_buttons(group, f"truck_{truck_num}_expenses", f"Truck {truck_num} Expenses Report")
 
     # ---------------------------------------
-    # Fuel Discounts by Truck (UPDATED to use dedicated discount_amount column)
+    # Fuel Discounts by Truck (KEEP structure)
     # ---------------------------------------
     st.subheader("Fuel Discounts by Truck")
     start_str = start_date.isoformat()
@@ -6688,7 +6597,10 @@ elif page == "Reports":
         SELECT 
             t.number AS truck_label,
             SUM(
-                COALESCE(e.discount_amount, 0)
+                COALESCE(
+                    CAST(json_extract(e.metadata, '$.discount_amount') AS REAL),
+                    0
+                )
             ) AS total_discount
         FROM trucks t
         LEFT JOIN expenses e 
@@ -7321,48 +7233,14 @@ elif page == "Reports":
         df_miles['total_miles'] = df_miles['total_loaded_miles'] + df_miles['total_empty_miles']
 
         # 2) Build your expenses by category, then pivot -> df_pivot
-        conn_expenses = get_db_connection()
-        try:
-            df_expenses_by_cat = safe_read_sql(
-                """
-                SELECT
-                    e.truck_id,
-                    t.number AS truck_number,
-                    e.category,
-                    COALESCE(SUM(e.amount), 0) AS category_total
-                FROM expenses e
-                LEFT JOIN trucks t ON e.truck_id = t.truck_id
-                WHERE e.date >= ? AND e.date <= ?
-                GROUP BY e.truck_id, t.number, e.category
-                """,
-                conn_expenses,
-                params=(cpm_start, cpm_end)
-            )
-        finally:
-            conn_expenses.close()
-        
-        # Handle empty result or None
-        if df_expenses_by_cat is None or df_expenses_by_cat.empty:
-            df_expenses_by_cat = pd.DataFrame(columns=['truck_id', 'truck_number', 'category', 'category_total'])
-        
-        # Coerce data types for safety
-        if not df_expenses_by_cat.empty:
-            df_expenses_by_cat['truck_id'] = pd.to_numeric(df_expenses_by_cat['truck_id'], errors='coerce').fillna(0).astype(int)
-            df_expenses_by_cat['truck_number'] = df_expenses_by_cat['truck_number'].astype(str)
-            df_expenses_by_cat['category_total'] = pd.to_numeric(df_expenses_by_cat['category_total'], errors='coerce').fillna(0.0)
-        
-        # Pivot the expenses by category
-        if not df_expenses_by_cat.empty:
-            df_pivot = df_expenses_by_cat.pivot_table(
-                index=['truck_id', 'truck_number'],
-                columns='category',
-                values='category_total',
-                fill_value=0,
-                aggfunc='sum'
-            ).reset_index()
-        else:
-            # Create empty pivot with required columns
-            df_pivot = pd.DataFrame(columns=['truck_id', 'truck_number'])
+        # df_expenses_by_cat = <your query here>
+        df_pivot = df_expenses_by_cat.pivot_table(
+            index=['truck_id', 'truck_number'],
+            columns='category',
+            values='category_total',
+            fill_value=0,
+            aggfunc='sum'
+        ).reset_index()
 
         # 3) All trucks
         conn_cpm_all = get_db_connection()
