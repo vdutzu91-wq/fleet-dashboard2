@@ -1207,6 +1207,68 @@ def ensure_expenses_attachments():
         conn.close()
 
 # -------------------------
+# Fuel expense columns migration
+# -------------------------
+def ensure_fuel_expense_columns():
+    """
+    Add separate columns for fuel expense data instead of storing in metadata JSON.
+    Columns: card_number, transaction_date, fuel_location, discount_amount, gallons
+    Safe to run multiple times on both SQLite and PostgreSQL.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    # List of columns to add: (column_name, data_type)
+    columns_to_add = [
+        ("card_number", "TEXT"),
+        ("transaction_date", "DATE"),
+        ("fuel_location", "TEXT"),
+        ("discount_amount", "NUMERIC DEFAULT 0"),
+        ("gallons", "NUMERIC")
+    ]
+    
+    try:
+        for col_name, col_type in columns_to_add:
+            try:
+                # Try to add column - will fail if column already exists
+                cur.execute(f"ALTER TABLE expenses ADD COLUMN {col_name} {col_type}")
+                conn.commit()
+            except Exception as e:
+                # Column likely already exists - continue with next column
+                # Handle both SQLite (OperationalError) and PostgreSQL (ProgrammingError) 
+                conn.rollback()
+                continue
+        
+        # Create indexes for performance (IF NOT EXISTS works in both SQLite and PostgreSQL)
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_expenses_transaction_date ON expenses(transaction_date)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_expenses_discount_amount ON expenses(discount_amount)")
+            conn.commit()
+        except Exception:
+            # Index creation failed - not critical
+            conn.rollback()
+            pass
+        
+    except Exception as e:
+        # Silent fail for compatibility
+        try:
+            conn.rollback()
+        except:
+            pass
+    finally:
+        try:
+            conn.close()
+        except:
+            pass
+
+# Run fuel columns migration
+try:
+    ensure_fuel_expense_columns()
+except Exception:
+    pass
+
+
+# -------------------------
 # History tables: loans + assignment histories
 # -------------------------
 def init_history_tables():
@@ -3333,13 +3395,25 @@ elif page == "Expenses":
                     if cat_obj:
                         cat_schema = cat_obj.get("schema", [])
                 
-                # Build metadata display
+                # Build metadata display - use dedicated columns for Fuel, metadata for others
                 meta_display = []
-                for f in cat_schema:
-                    key = f.get("key")
-                    label = f.get("label")
-                    if key in meta:
-                        meta_display.append(f"{label}: {meta[key]}")
+                if row.get("category") == "Fuel":
+                    # Use dedicated columns for Fuel expenses
+                    if pd.notna(row.get("card_number")):
+                        meta_display.append(f"Card Number: {row['card_number']}")
+                    if pd.notna(row.get("transaction_date")):
+                        meta_display.append(f"Transaction Date: {row['transaction_date']}")
+                    if pd.notna(row.get("fuel_location")):
+                        meta_display.append(f"Location: {row['fuel_location']}")
+                    if pd.notna(row.get("discount_amount")) and float(row.get("discount_amount", 0)) > 0:
+                        meta_display.append(f"Discount Amount: ${float(row['discount_amount']):.2f}")
+                else:
+                    # Use metadata JSON for other categories
+                    for f in cat_schema:
+                        key = f.get("key")
+                        label = f.get("label")
+                        if key in meta:
+                            meta_display.append(f"{label}: {meta[key]}")
                 
                 # Attachments count
                 attachments = []
@@ -4762,12 +4836,23 @@ elif page == "Bulk Upload":
                                                     (ident, None, None, None, None, None, "Active", 0.0))
                                         truck_id = cur.lastrowid
                                         created_trucks += 1
+                                        # Update maps immediately so subsequent rows can find this truck
+                                        number_map[ident] = truck_id
+                                    elif truck_id is None and not create_missing_trucks and ident:
+                                        # Truck not found and auto-create is disabled
+                                        errors.append(f"Row {idx+1}: Truck '{row[mapping['truck_number_col']]}' not found. Enable auto-create or add truck manually.")
 
                                 # parse category-specific fields to metadata and primary amount/date
                                 metadata = {}
                                 amount_val = None
                                 date_val = None
                                 gallons_val = None
+                                
+                                # Initialize fuel-specific variables
+                                card_number_val = None
+                                transaction_date_val = None
+                                fuel_location_val = None
+                                discount_amount_val = 0.0
 
                                 if selected_category == "Fuel":
                                     # look up each mapped column
@@ -4778,14 +4863,22 @@ elif page == "Bulk Upload":
                                     discount_col = mapping.get("discount_col")
                                     gallons_col = mapping.get("gallons_col")
                                 
-                                    metadata = {
-                                        "card_number": row[card] if card and pd.notna(row[card]) else None,
-                                        "transaction_date": str(pd.to_datetime(row[tx_date]).date()) if tx_date and pd.notna(row[tx_date]) else None,
-                                        "location": row[location] if location and pd.notna(row[location]) else None,
-                                        "discount_amount": float(row[discount_col]) if discount_col and pd.notna(row[discount_col]) else 0.0
-                                    }
+                                    # Extract fuel-specific values for dedicated columns
+                                    card_number_val = row[card] if card and pd.notna(row[card]) else None
+                                    transaction_date_val = str(pd.to_datetime(row[tx_date]).date()) if tx_date and pd.notna(row[tx_date]) else None
+                                    fuel_location_val = row[location] if location and pd.notna(row[location]) else None
+                                    discount_amount_val = float(row[discount_col]) if discount_col and pd.notna(row[discount_col]) else 0.0
+                                    
                                     amount_val = float(row[amount_col]) if amount_col and pd.notna(row[amount_col]) else 0.0
-                                    date_val = metadata.get("transaction_date")
+                                    date_val = transaction_date_val
+                                    
+                                    # Keep metadata for backward compatibility (but now just as backup/reference)
+                                    metadata = {
+                                        "card_number": card_number_val,
+                                        "transaction_date": transaction_date_val,
+                                        "location": fuel_location_val,
+                                        "discount_amount": discount_amount_val
+                                    }
                                 
                                     # Parse gallons
                                     if gallons_col and pd.notna(row[gallons_col]):
@@ -4828,11 +4921,21 @@ elif page == "Bulk Upload":
                                                 pass
                                     date_val = metadata.get("date") or metadata.get("transaction_date") or metadata.get("date_occurred")
 
-                                # Insert into DB
-                                cur.execute("""
-                                    INSERT INTO expenses (date, category, amount, truck_id, description, metadata, apply_mode, gallons)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                                """, (date_val, selected_category, float(amount_val or 0.0), truck_id, None, json.dumps(metadata), cat.get("default_apply_mode", "individual"), gallons_val))
+                                # Insert into DB - use dedicated columns for Fuel, metadata for others
+                                if selected_category == "Fuel":
+                                    cur.execute("""
+                                        INSERT INTO expenses (date, category, amount, truck_id, description, metadata, apply_mode, gallons,
+                                                             card_number, transaction_date, fuel_location, discount_amount)
+                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    """, (date_val, selected_category, float(amount_val or 0.0), truck_id, None, json.dumps(metadata), 
+                                         cat.get("default_apply_mode", "individual"), gallons_val,
+                                         card_number_val, transaction_date_val, fuel_location_val, discount_amount_val))
+                                else:
+                                    cur.execute("""
+                                        INSERT INTO expenses (date, category, amount, truck_id, description, metadata, apply_mode, gallons)
+                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                    """, (date_val, selected_category, float(amount_val or 0.0), truck_id, None, json.dumps(metadata), 
+                                         cat.get("default_apply_mode", "individual"), gallons_val))
                                 success_count += 1
 
                             except Exception as e:
@@ -6574,7 +6677,7 @@ elif page == "Reports":
         export_buttons(group, f"truck_{truck_num}_expenses", f"Truck {truck_num} Expenses Report")
 
     # ---------------------------------------
-    # Fuel Discounts by Truck (KEEP structure)
+    # Fuel Discounts by Truck (UPDATED to use dedicated discount_amount column)
     # ---------------------------------------
     st.subheader("Fuel Discounts by Truck")
     start_str = start_date.isoformat()
@@ -6585,10 +6688,7 @@ elif page == "Reports":
         SELECT 
             t.number AS truck_label,
             SUM(
-                COALESCE(
-                    CAST(json_extract(e.metadata, '$.discount_amount') AS REAL),
-                    0
-                )
+                COALESCE(e.discount_amount, 0)
             ) AS total_discount
         FROM trucks t
         LEFT JOIN expenses e 
