@@ -13,6 +13,7 @@ import tempfile
 import traceback
 import errno
 import json
+import pdfkit
 import tempfile
 import numpy as np
 import time
@@ -27,11 +28,10 @@ ROLE_NAMES = {
 }
 
 from math import isfinite
-
-from sqlalchemy import create_engine, text
-from sqlalchemy.exc import SQLAlchemyError
-import psycopg
 from datetime import datetime, date
+pdfkit_config = pdfkit.configuration(
+    wkhtmltopdf=r"C:\Program Files\wkhtmltopdf\bin\wkhtmltopdf.exe"
+)
 from datetime import date # already present above, ok
 
 COMPANY_START = date(2019, 1, 1)
@@ -933,10 +933,8 @@ def init_database():
         truck_id INTEGER,
         description TEXT,
         pickup_date DATE,
-        pickup_time TEXT,
         pickup_address TEXT,
         delivery_date DATE,
-        delivery_time TEXT,
         delivery_address TEXT,
         job_reference TEXT,
         empty_miles REAL,
@@ -1115,46 +1113,38 @@ def run_database_migrations():
             pass
         return False
 
+# MOVED TO LAZY INITIALIZATION - These are now called after Streamlit starts
 # call initial DB creation
-init_database()
+# init_database()
 
 # Run database migrations to add missing columns
 # This is safe to run on every startup - it only adds columns that don't exist
-run_database_migrations()
+# run_database_migrations()
 
 # -------------------------
+# DB connection helper (must exist before migrations that use it)
 # -------------------------
-# Database Connection - PostgreSQL (Neon)
-# -------------------------
+# Absolute DB path (keep as you have)
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_FILE = os.path.join(APP_DIR, "fleet_management.db")
 
-_db_engine = None
-
-def get_db_engine():
-    """Get or create PostgreSQL engine"""
-    global _db_engine
-    if _db_engine is None:
+def get_db_connection() -> sqlite3.Connection:
+    """Get database connection with timeout protection"""
+    try:
+        conn = sqlite3.connect(
+            DB_FILE,
+            detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
+            check_same_thread=False,
+            timeout=10.0  # 10 second timeout to prevent indefinite blocking
+        )
+        conn.row_factory = sqlite3.Row
         try:
-            url = st.secrets.get("DATABASE_URL", "")
-            if not url:
-                # Construct from individual components  
-                host = st.secrets.get("PGHOST", st.secrets.get("postgres_host"))
-                db = st.secrets.get("PGDATABASE", st.secrets.get("postgres_db"))
-                user = st.secrets.get("PGUSER", st.secrets.get("postgres_user"))
-                pwd = st.secrets.get("PGPASSWORD", st.secrets.get("postgres_password"))
-                url = f"postgresql+psycopg://{user}:{pwd}@{host}:5432/{db}?sslmode=require"
-            elif url.startswith("postgres://"):
-                url = url.replace("postgres://", "postgresql+psycopg://", 1)
-            
-            _db_engine = create_engine(url, pool_pre_ping=True, pool_size=5, max_overflow=10)
-        except Exception as e:
-            st.error(f"❌ Database connection failed: {e}")
-            st.info("💡 Ensure DATABASE_URL is set in Streamlit secrets")
-            st.stop()
-    return _db_engine
-
-def get_db_connection():
-    """Get database connection for queries"""
-    return get_db_engine().connect()
+            conn.execute("PRAGMA foreign_keys = ON;")
+        except Exception:
+            pass
+        return conn
+    except sqlite3.OperationalError as e:
+        raise Exception(f"Database connection failed: {e}. Please check if the database is locked or accessible.")
 
 def close_all_db_connections():
     # No-op now; kept for compatibility
@@ -1221,8 +1211,9 @@ def init_users_db():
     
     conn.close()
 
+# MOVED TO LAZY INITIALIZATION - Called after Streamlit starts
 # Call this in your main initialization
-init_users_db()
+# init_users_db()
 
 # -------------------------
 # Expenses attachments & indexes (add near your ensure_expenses_table function)
@@ -1361,23 +1352,24 @@ try:
     _conn_mig.close()
 except Exception as _mig_err:
     # Non-fatal: show a small note in Streamlit, continue
-    try:
-        st.warning(f"Trailer history migration check failed: {_mig_err}")
-    except Exception:
-        pass
+# MOVED TO LAZY INITIALIZATION - Called after Streamlit starts
+# init_history_tables()
 
-# Now that DB helpers and schema exist, create default categories
-ensure_default_expense_categories()
-ensure_maintenance_category()
+# MOVED TO LAZY INITIALIZATION - Run one-time migration: add truck_id to trailer history and backfill
+# try:
+#     _conn_mig = get_db_connection()
+#     migrate_trailer_history_add_truck_id(_conn_mig)
+#     _conn_mig.close()
+# except Exception as _mig_err:
+#     # Non-fatal: show a small note in Streamlit, continue
+#     try:
+#     st.warning(f"Trailer history migration check failed: {_mig_err}")
+#     except Exception:
+#     pass
 
-# -------------------------
-# Ensure trailer.truck_id column exists (safe)
-# -------------------------
-def ensure_trailer_truck_link():
-    conn = get_db_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("ALTER TABLE trailers ADD COLUMN truck_id INTEGER")
+# MOVED TO LAZY INITIALIZATION - Now that DB helpers and schema exist, create default categories
+# ensure_default_expense_categories()
+# ensure_maintenance_category()
     except sqlite3.OperationalError:
         pass
     conn.commit()
@@ -1391,7 +1383,8 @@ ensure_trailer_truck_link()
 def ensure_dispatcher_tables():
     conn = get_db_connection()
     cur = conn.cursor()
-    # dispatchers table
+# MOVED TO LAZY INITIALIZATION - Called after Streamlit starts
+# ensure_trailer_truck_link()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS dispatchers (
             dispatcher_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1473,8 +1466,8 @@ ensure_dispatcher_tables()
 # Ensure trucks has dispatcher_id column (safe)
 # -------------------------
 def ensure_truck_dispatcher_link():
-    conn = get_db_connection()
-    cur = conn.cursor()
+# MOVED TO LAZY INITIALIZATION - call to ensure tables exist
+# ensure_dispatcher_tables()
     try:
         cur.execute("ALTER TABLE trucks ADD COLUMN dispatcher_id INTEGER")
     except sqlite3.OperationalError:
@@ -1490,7 +1483,8 @@ ensure_truck_dispatcher_link()
 # -------------------------
 def backup_db_file_bytes():
     """Return binary bytes of the sqlite DB file for download"""
-    with open(DB_FILE, 'rb') as f:
+# MOVED TO LAZY INITIALIZATION - Called after Streamlit starts
+# ensure_truck_dispatcher_link()
         return f.read()
 
 def export_sql_dump_bytes():
@@ -1970,8 +1964,77 @@ seed_existing_loans_start()
 # -------------------------
 # Streamlit setup
 # -------------------------
-st.set_page_config(page_title="Fleet Management System", page_icon="🚛", layout="wide")
-st.title("🚛 Fleet Management System")
+# MOVED TO LAZY INITIALIZATION - call seed once (safe - checks for existing entries)
+# seed_existing_loans_start()
+
+
+# ====================================================================
+# LAZY DATABASE INITIALIZATION
+# ====================================================================
+# This function performs all database initialization in a lazy manner
+# after Streamlit UI has started, preventing blocking during module load
+# ====================================================================
+
+def initialize_database_lazy():
+    """
+    Lazy database initialization - called once after Streamlit starts.
+    Uses session state to ensure it only runs once per session.
+    Includes proper error handling and user feedback.
+    """
+    # Check if already initialized
+    if st.session_state.get("db_initialized", False):
+        return True
+    
+    try:
+        # Show spinner during initialization
+        with st.spinner("🔄 Initializing database... This should only take a moment."):
+            # 1. Initialize core database schema
+            init_database()
+            
+            # 2. Run database migrations
+            run_database_migrations()
+            
+            # 3. Initialize user authentication tables
+            init_users_db()
+            
+            # 4. Initialize history tables
+            init_history_tables()
+            
+            # 5. Run trailer history migration
+            try:
+                _conn_mig = get_db_connection()
+                migrate_trailer_history_add_truck_id(_conn_mig)
+                _conn_mig.close()
+            except Exception as mig_err:
+                # Non-fatal migration error
+                st.warning(f"⚠️ Minor migration issue (non-critical): {mig_err}")
+            
+            # 6. Ensure default expense categories exist
+            ensure_default_expense_categories()
+            ensure_maintenance_category()
+            
+            # 7. Ensure column additions
+            ensure_trailer_truck_link()
+            ensure_dispatcher_tables()
+            ensure_truck_dispatcher_link()
+            
+            # 8. Seed existing loans if needed
+            seed_existing_loans_start()
+            
+            # Mark as initialized
+            st.session_state.db_initialized = True
+            
+            return True
+            
+    except Exception as e:
+        st.error(f"❌ Database initialization failed: {e}")
+        st.info("💡 **Troubleshooting tips:**")
+        st.info("1. Check if the database file is accessible and not locked by another process")
+        st.info("2. Ensure you have write permissions to the application directory")
+        st.info("3. Try restarting the application")
+        st.stop()
+        return False
+
 st.markdown(
     """
     <style>
@@ -2040,6 +2103,19 @@ def logout():
     st.session_state.authenticated = False
     st.session_state.user = None
     st.rerun()
+
+
+# ====================================================================
+# CRITICAL: Initialize database BEFORE any authentication or app logic
+# This ensures the database is ready but doesn't block module loading
+# ====================================================================
+# Initialize session state for database initialization flag
+if "db_initialized" not in st.session_state:
+    st.session_state.db_initialized = False
+
+# Perform lazy database initialization (only runs once per session)
+if not st.session_state.db_initialized:
+    initialize_database_lazy()
 
 # Check authentication
 if not st.session_state.authenticated:
