@@ -13,10 +13,17 @@ import tempfile
 import traceback
 import errno
 import json
-import pdfkit
 import tempfile
 import numpy as np
 import time
+
+# ReportLab imports for PDF generation
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter, A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.pdfgen import canvas
 
 # Simple role display names
 ROLE_NAMES = {
@@ -29,10 +36,6 @@ ROLE_NAMES = {
 
 from math import isfinite
 from datetime import datetime, date
-pdfkit_config = pdfkit.configuration(
-    wkhtmltopdf=r"C:\Program Files\wkhtmltopdf\bin\wkhtmltopdf.exe"
-)
-from datetime import date # already present above, ok
 
 COMPANY_START = date(2019, 1, 1)
 
@@ -159,58 +162,95 @@ def export_to_excel(df, filename_prefix="report"):
     )
 
 def export_to_pdf_table(df, title="Report"):
-    """Exports a DataFrame to PDF using pdfkit (wkhtmltopdf backend)."""
+    """Exports a DataFrame to PDF using ReportLab (pure Python, works everywhere)."""
     if df is None or df.empty:
         st.warning("No data available to export.")
         return
 
-    html = f"""
-    <html>
-      <head>
-        <meta charset="utf-8">
-        <title>{title}</title>
-        <style>
-          body {{
-            font-family: Arial, sans-serif;
-            margin: 25px;
-          }}
-          h2 {{
-            text-align: center;
-            margin-bottom: 20px;
-          }}
-          table {{
-            border-collapse: collapse;
-            width: 100%;
-            font-size: 13px;
-          }}
-          th, td {{
-            border: 1px solid #ccc;
-            padding: 6px 10px;
-            text-align: center;
-          }}
-          th {{
-            background-color: #f2f2f2;
-            font-weight: bold;
-          }}
-        </style>
-      </head>
-      <body>
-        <h2>{title}</h2>
-        {df.to_html(index=False, justify="center")}
-      </body>
-    </html>
-    """
-
-    # Create PDF in a temporary file
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmpfile:
-        pdfkit.from_string(html, tmpfile.name, configuration=pdfkit_config)
-        tmpfile.seek(0)
+    try:
+        # Create PDF in memory
+        buffer = io.BytesIO()
+        
+        # Create the PDF document with letter size
+        doc = SimpleDocTemplate(buffer, pagesize=letter, 
+                                rightMargin=30, leftMargin=30,
+                                topMargin=30, bottomMargin=18)
+        
+        # Container for the 'Flowable' objects
+        elements = []
+        
+        # Define styles
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=16,
+            textColor=colors.HexColor('#1f77b4'),
+            spaceAfter=20,
+            alignment=1  # Center alignment
+        )
+        
+        # Add title
+        title_para = Paragraph(title, title_style)
+        elements.append(title_para)
+        elements.append(Spacer(1, 12))
+        
+        # Prepare table data
+        # Convert DataFrame to list of lists
+        data = [df.columns.tolist()] + df.values.tolist()
+        
+        # Limit column widths for better formatting
+        # Calculate column widths based on content
+        num_cols = len(df.columns)
+        available_width = 7.5 * inch  # Letter width minus margins
+        col_width = available_width / num_cols
+        
+        # If too many columns, reduce font size
+        font_size = 9 if num_cols > 10 else 10
+        
+        # Create table
+        table = Table(data, colWidths=[col_width] * num_cols)
+        
+        # Style the table
+        table_style = TableStyle([
+            # Header row
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#f2f2f2')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), font_size + 1),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            
+            # Data rows
+            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 1), (-1, -1), font_size),
+            ('ALIGN', (0, 1), (-1, -1), 'CENTER'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f9f9f9')]),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ])
+        
+        table.setStyle(table_style)
+        elements.append(table)
+        
+        # Build PDF
+        doc.build(elements)
+        
+        # Get the PDF data
+        pdf_data = buffer.getvalue()
+        buffer.close()
+        
+        # Create download button
         st.download_button(
             label=f"📄 Download {title}.pdf",
-            data=tmpfile.read(),
+            data=pdf_data,
             file_name=f"{title}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
             mime="application/pdf",
         )
+        
+    except Exception as e:
+        st.error(f"Error generating PDF: {e}")
+        st.info("💡 If you see this error, please report it to the administrator.")
 
 def export_buttons(df, base_name="report", title="Report"):
     """Render Excel + PDF export buttons side by side."""
@@ -1352,6 +1392,8 @@ try:
     _conn_mig.close()
 except Exception as _mig_err:
     # Non-fatal: show a small note in Streamlit, continue
+    pass
+
 # MOVED TO LAZY INITIALIZATION - Called after Streamlit starts
 # init_history_tables()
 
@@ -1370,10 +1412,6 @@ except Exception as _mig_err:
 # MOVED TO LAZY INITIALIZATION - Now that DB helpers and schema exist, create default categories
 # ensure_default_expense_categories()
 # ensure_maintenance_category()
-    except sqlite3.OperationalError:
-        pass
-    conn.commit()
-    conn.close()
 
 ensure_trailer_truck_link()
 
@@ -1483,8 +1521,7 @@ ensure_truck_dispatcher_link()
 # -------------------------
 def backup_db_file_bytes():
     """Return binary bytes of the sqlite DB file for download"""
-# MOVED TO LAZY INITIALIZATION - Called after Streamlit starts
-# ensure_truck_dispatcher_link()
+    with open(DB_FILE, 'rb') as f:
         return f.read()
 
 def export_sql_dump_bytes():
