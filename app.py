@@ -1,5 +1,5 @@
 import streamlit as st
-import sqlite3
+# SQLite removed - using PostgreSQL only
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -13,17 +13,26 @@ import tempfile
 import traceback
 import errno
 import json
+# pdfkit removed - using reportlab
 import tempfile
 import numpy as np
 import time
 
-# ReportLab imports for PDF generation
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import letter, A4
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-from reportlab.pdfgen import canvas
+# PostgreSQL/Neon Database imports
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
+
+# PDF generation with reportlab
+try:
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib import colors
+    from reportlab.lib.units import inch
+    from reportlab.platypus import SimpleDocTemplate, Table as RLTable, TableStyle, Paragraph, Spacer
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
+
 
 # Simple role display names
 ROLE_NAMES = {
@@ -39,6 +48,128 @@ from datetime import datetime, date
 
 COMPANY_START = date(2019, 1, 1)
 
+
+
+# ============================================================================
+# POSTGRESQL DATABASE MODULE (NEON) - ONLY DATABASE USED
+# ============================================================================
+
+_db_engine = None
+_db_initialized = False
+
+def get_db_engine():
+    """Get or create PostgreSQL engine"""
+    global _db_engine
+    if _db_engine is None:
+        try:
+            url = st.secrets.get("DATABASE_URL", "")
+            if not url:
+                host = st.secrets.get("PGHOST", st.secrets.get("postgres_host", ""))
+                db = st.secrets.get("PGDATABASE", st.secrets.get("postgres_db", ""))
+                user = st.secrets.get("PGUSER", st.secrets.get("postgres_user", ""))
+                pwd = st.secrets.get("PGPASSWORD", st.secrets.get("postgres_password", ""))
+                
+                if not all([host, db, user, pwd]):
+                    raise Exception("Database credentials missing in secrets")
+                
+                url = f"postgresql+psycopg2://{user}:{pwd}@{host}:5432/{db}?sslmode=require"
+            elif url.startswith("postgres://"):
+                url = url.replace("postgres://", "postgresql+psycopg2://", 1)
+            
+            _db_engine = create_engine(url, pool_pre_ping=True, pool_size=5, max_overflow=10)
+            
+            # Test connection
+            with _db_engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            
+        except Exception as e:
+            st.error(f"❌ Database connection failed: {e}")
+            st.info("💡 Set DATABASE_URL in Streamlit secrets")
+            st.stop()
+    
+    return _db_engine
+
+def get_db_connection():
+    """Get database connection"""
+    return get_db_engine().connect()
+
+def close_all_db_connections():
+    """Close database connections"""
+    global _db_engine
+    if _db_engine:
+        _db_engine.dispose()
+        _db_engine = None
+
+def close_all_db_connections_if_any():
+    """Compatibility function"""
+    close_all_db_connections()
+
+
+
+# Compatibility layer for existing database code
+class DBConnectionWrapper:
+    """Wrapper to make SQLAlchemy connection behave like sqlite3 connection"""
+    def __init__(self, sa_connection):
+        self.conn = sa_connection
+        self._in_transaction = False
+        
+    def cursor(self):
+        """Return self as cursor (SQLAlchemy connection can execute directly)"""
+        return self
+    
+    def execute(self, query, params=None):
+        """Execute query with automatic parameter conversion"""
+        # Convert ? to :paramN for positional parameters
+        if params and '?' in str(query):
+            if isinstance(params, (list, tuple)):
+                named_params = {}
+                query_str = str(query)
+                for i, param in enumerate(params):
+                    placeholder = f":param{i}"
+                    query_str = query_str.replace("?", placeholder, 1)
+                    named_params[f"param{i}"] = param
+                return self.conn.execute(text(query_str), named_params)
+            elif isinstance(params, dict):
+                return self.conn.execute(text(str(query)), params)
+        else:
+            return self.conn.execute(text(str(query)), params or {})
+    
+    def fetchone(self):
+        """Compatibility - not used with this wrapper"""
+        return None
+    
+    def fetchall(self):
+        """Compatibility - not used with this wrapper"""
+        return []
+    
+    def commit(self):
+        """Commit transaction"""
+        if hasattr(self.conn, 'commit'):
+            self.conn.commit()
+    
+    def close(self):
+        """Close connection"""
+        if hasattr(self.conn, 'close'):
+            self.conn.close()
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+def get_db_connection_compat():
+    """Get wrapped database connection for compatibility"""
+    return DBConnectionWrapper(get_db_connection())
+
+# Override get_db_connection to return wrapped version
+_get_db_connection_original = get_db_connection
+
+def get_db_connection():
+    """Get database connection with SQLite compatibility"""
+    return DBConnectionWrapper(_get_db_connection_original())
+
+# ============================================================================
 import hashlib
 import json
 
@@ -161,96 +292,75 @@ def export_to_excel(df, filename_prefix="report"):
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
+
 def export_to_pdf_table(df, title="Report"):
-    """Exports a DataFrame to PDF using ReportLab (pure Python, works everywhere)."""
+    """Export DataFrame to PDF using reportlab"""
     if df is None or df.empty:
         st.warning("No data available to export.")
         return
-
-    try:
-        # Create PDF in memory
-        buffer = io.BytesIO()
-        
-        # Create the PDF document with letter size
-        doc = SimpleDocTemplate(buffer, pagesize=letter, 
-                                rightMargin=30, leftMargin=30,
-                                topMargin=30, bottomMargin=18)
-        
-        # Container for the 'Flowable' objects
-        elements = []
-        
-        # Define styles
-        styles = getSampleStyleSheet()
-        title_style = ParagraphStyle(
-            'CustomTitle',
-            parent=styles['Heading1'],
-            fontSize=16,
-            textColor=colors.HexColor('#1f77b4'),
-            spaceAfter=20,
-            alignment=1  # Center alignment
+    
+    if not REPORTLAB_AVAILABLE:
+        # Fallback to HTML
+        html = df.to_html(index=False)
+        st.download_button(
+            label=f"📄 Download {title}.html",
+            data=html,
+            file_name=f"{title}_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
+            mime="text/html",
         )
-        
-        # Add title
-        title_para = Paragraph(title, title_style)
-        elements.append(title_para)
-        elements.append(Spacer(1, 12))
-        
-        # Prepare table data
-        # Convert DataFrame to list of lists
-        data = [df.columns.tolist()] + df.values.tolist()
-        
-        # Limit column widths for better formatting
-        # Calculate column widths based on content
-        num_cols = len(df.columns)
-        available_width = 7.5 * inch  # Letter width minus margins
-        col_width = available_width / num_cols
-        
-        # If too many columns, reduce font size
-        font_size = 9 if num_cols > 10 else 10
-        
-        # Create table
-        table = Table(data, colWidths=[col_width] * num_cols)
-        
-        # Style the table
-        table_style = TableStyle([
-            # Header row
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#f2f2f2')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), font_size + 1),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-            
-            # Data rows
-            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-            ('FONTSIZE', (0, 1), (-1, -1), font_size),
-            ('ALIGN', (0, 1), (-1, -1), 'CENTER'),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f9f9f9')]),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ])
-        
-        table.setStyle(table_style)
-        elements.append(table)
-        
-        # Build PDF
+        return
+    
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    elements = []
+    
+    # Add title
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        'Title',
+        parent=styles['Heading1'],
+        fontSize=16,
+        alignment=1
+    )
+    elements.append(Paragraph(title, title_style))
+    elements.append(Spacer(1, 0.25*inch))
+    
+    # Prepare table data (limit size)
+    max_rows = 100
+    max_cols = 10
+    df_subset = df.iloc[:max_rows, :max_cols]
+    
+    table_data = [[str(col) for col in df_subset.columns]]
+    for _, row in df_subset.iterrows():
+        table_data.append([str(val)[:50] if pd.notna(val) else '' for val in row])
+    
+    # Create table
+    col_width = 7.5 * inch / len(df_subset.columns)
+    table = RLTable(table_data, colWidths=[col_width] * len(df_subset.columns))
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 8),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+        ('FONTSIZE', (0, 1), (-1, -1), 7),
+    ]))
+    
+    elements.append(table)
+    
+    # Build PDF
+    try:
         doc.build(elements)
-        
-        # Get the PDF data
-        pdf_data = buffer.getvalue()
-        buffer.close()
-        
-        # Create download button
+        buffer.seek(0)
         st.download_button(
             label=f"📄 Download {title}.pdf",
-            data=pdf_data,
+            data=buffer.getvalue(),
             file_name=f"{title}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
             mime="application/pdf",
         )
-        
     except Exception as e:
-        st.error(f"Error generating PDF: {e}")
-        st.info("💡 If you see this error, please report it to the administrator.")
+        st.error(f"PDF error: {e}")
 
 def export_buttons(df, base_name="report", title="Report"):
     """Render Excel + PDF export buttons side by side."""
@@ -264,7 +374,7 @@ def export_buttons(df, base_name="report", title="Report"):
     with c2:
         export_to_pdf_table(df, title)
 
-DB_FILE = 'fleet_management.db'
+# DB_FILE removed - using PostgreSQL
 
 def to_date(v):
     """
@@ -550,7 +660,6 @@ def ensure_expenses_attachments():
         cur = conn.cursor()
         
         # Check if attachments column exists
-        cur.execute("PRAGMA table_info(expenses)")
         columns = [col[1] for col in cur.fetchall()]
         
         if 'attachments' not in columns:
@@ -581,11 +690,11 @@ def ensure_expense_categories_table():
         # ensure expenses table has metadata and apply_mode columns
         try:
             cur.execute("ALTER TABLE expenses ADD COLUMN metadata TEXT")
-        except sqlite3.OperationalError:
+        except Exception:
             pass
         try:
             cur.execute("ALTER TABLE expenses ADD COLUMN apply_mode TEXT")
-        except sqlite3.OperationalError:
+        except Exception:
             pass
         conn.commit()
     finally:
@@ -626,7 +735,7 @@ def add_or_update_expense_category(name, field_list, default_apply_mode="individ
         try:
             cur.execute("INSERT INTO expense_categories (name, schema_json, default_apply_mode) VALUES (?, ?, ?)",
                         (name, schema_json, default_apply_mode))
-        except sqlite3.IntegrityError:
+        except Exception:
             cur.execute("UPDATE expense_categories SET schema_json=?, default_apply_mode=? WHERE name=?",
                         (schema_json, default_apply_mode, name))
         conn.commit()
@@ -895,159 +1004,6 @@ def get_preset_date_range(preset):
 # -------------------------
 # Core DB creation & migration
 # -------------------------
-def init_database():
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    
-    # trucks
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS trucks (
-        truck_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        number TEXT UNIQUE,
-        make TEXT,
-        model TEXT,
-        year INTEGER,
-        plate TEXT,
-        vin TEXT,
-        status TEXT DEFAULT 'Active',
-        trailer_id INTEGER,
-        driver_id INTEGER,
-        loan_amount REAL DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-    
-    # trailers
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS trailers (
-        trailer_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        number TEXT UNIQUE,
-        type TEXT,
-        year INTEGER,
-        plate TEXT,
-        vin TEXT,
-        status TEXT DEFAULT 'Active',
-        loan_amount REAL DEFAULT 0,
-        truck_id INTEGER,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-    
-    # drivers
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS drivers (
-        driver_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        license_number TEXT,
-        phone TEXT,
-        email TEXT,
-        hire_date DATE,
-        status TEXT DEFAULT 'Active',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-    
-    # expenses
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS expenses (
-        expense_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        date DATE NOT NULL,
-        category TEXT NOT NULL,
-        amount REAL NOT NULL,
-        truck_id INTEGER,
-        description TEXT,
-        location TEXT,
-        service_type TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (truck_id) REFERENCES trucks (truck_id)
-    )
-    ''')
-
-    # income
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS income (
-        income_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        date DATE NOT NULL,
-        source TEXT NOT NULL,
-        amount REAL NOT NULL,
-        truck_id INTEGER,
-        description TEXT,
-        pickup_date DATE,
-        pickup_address TEXT,
-        delivery_date DATE,
-        delivery_address TEXT,
-        job_reference TEXT,
-        empty_miles REAL,
-        loaded_miles REAL,
-        rpm REAL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (truck_id) REFERENCES trucks (truck_id)
-    )
-    ''')
-
-    # Add these columns to your income table initialization
-    try:
-        cur.execute("ALTER TABLE income ADD COLUMN driver_name TEXT")
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        cur.execute("ALTER TABLE income ADD COLUMN broker_number TEXT")
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        cur.execute("ALTER TABLE income ADD COLUMN tonu TEXT DEFAULT 'N'")
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        cur.execute("ALTER TABLE income ADD COLUMN pickup_city TEXT")
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        cur.execute("ALTER TABLE income ADD COLUMN pickup_state TEXT")
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        cur.execute("ALTER TABLE income ADD COLUMN pickup_zip TEXT")
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        cur.execute("ALTER TABLE income ADD COLUMN delivery_city TEXT")
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        cur.execute("ALTER TABLE income ADD COLUMN delivery_state TEXT")
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        cur.execute("ALTER TABLE income ADD COLUMN delivery_zip TEXT")
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        cur.execute("ALTER TABLE income ADD COLUMN stops INTEGER")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE income ADD COLUMN pickup_full_address TEXT")
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        cur.execute("ALTER TABLE income ADD COLUMN delivery_full_address TEXT")
-    except sqlite3.OperationalError:
-        pass
-
-    conn.commit()
-    conn.close()
-
 # ----
 # Database Schema Migration Functions
 # ----
@@ -1055,10 +1011,9 @@ def get_table_columns_for_migration(conn, table_name):
     """Get list of column names for a table"""
     try:
         cur = conn.cursor()
-        cur.execute(f"PRAGMA table_info({table_name})")
         columns = [row[1] for row in cur.fetchall()]
         return columns
-    except sqlite3.OperationalError:
+    except Exception:
         return []
 
 def add_column_if_missing_migration(conn, table_name, column_name, column_type, default_value=None):
@@ -1081,7 +1036,7 @@ def add_column_if_missing_migration(conn, table_name, column_name, column_type, 
         cur = conn.cursor()
         cur.execute(alter_sql)
         return True
-    except sqlite3.OperationalError as e:
+    except Exception as e:
         # Column might already exist (race condition or duplicate column error)
         if "duplicate column" in str(e).lower():
             return False
@@ -1089,69 +1044,6 @@ def add_column_if_missing_migration(conn, table_name, column_name, column_type, 
             # Re-raise other errors
             raise
 
-def run_database_migrations():
-    """
-    Run all database schema migrations to add missing columns.
-    This function is idempotent - safe to run multiple times.
-    Fixes schema errors by adding missing columns to tables.
-    """
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-        
-        # Enable foreign keys
-        cur.execute("PRAGMA foreign_keys = ON")
-        
-        migration_log = []
-        
-        # Income table migrations
-        if add_column_if_missing_migration(conn, "income", "pickup_time", "TIME"):
-            migration_log.append("Added income.pickup_time")
-        if add_column_if_missing_migration(conn, "income", "delivery_time", "TIME"):
-            migration_log.append("Added income.delivery_time")
-        
-        # Expenses table migrations  
-        if add_column_if_missing_migration(conn, "expenses", "gallons", "REAL", "0"):
-            migration_log.append("Added expenses.gallons")
-        
-        # Trucks table migrations
-        if add_column_if_missing_migration(conn, "trucks", "loan_start_date", "DATE"):
-            migration_log.append("Added trucks.loan_start_date")
-        if add_column_if_missing_migration(conn, "trucks", "loan_term_months", "INTEGER", "0"):
-            migration_log.append("Added trucks.loan_term_months")
-        # dispatcher_id might already be added by ensure_truck_dispatcher_link(), but safe to check
-        if add_column_if_missing_migration(conn, "trucks", "dispatcher_id", "INTEGER"):
-            migration_log.append("Added trucks.dispatcher_id")
-        
-        # Trailers table migrations
-        if add_column_if_missing_migration(conn, "trailers", "loan_start_date", "DATE"):
-            migration_log.append("Added trailers.loan_start_date")
-        if add_column_if_missing_migration(conn, "trailers", "loan_term_months", "INTEGER", "0"):
-            migration_log.append("Added trailers.loan_term_months")
-        
-        # Commit all changes
-        conn.commit()
-        conn.close()
-        
-        # Only log if changes were made (to avoid spam in production)
-        if migration_log:
-            print("=" * 60)
-            print(f"Database migration completed: {len(migration_log)} column(s) added")
-            for log_entry in migration_log:
-                print(f"  ✓ {log_entry}")
-            print("=" * 60)
-        
-        return True
-        
-    except Exception as e:
-        print(f"Database migration error: {e}")
-        try:
-            conn.rollback()
-            conn.close()
-        except:
-            pass
-        return False
 
 # MOVED TO LAZY INITIALIZATION - These are now called after Streamlit starts
 # call initial DB creation
@@ -1159,41 +1051,6 @@ def run_database_migrations():
 
 # Run database migrations to add missing columns
 # This is safe to run on every startup - it only adds columns that don't exist
-# run_database_migrations()
-
-# -------------------------
-# DB connection helper (must exist before migrations that use it)
-# -------------------------
-# Absolute DB path (keep as you have)
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FILE = os.path.join(APP_DIR, "fleet_management.db")
-
-def get_db_connection() -> sqlite3.Connection:
-    """Get database connection with timeout protection"""
-    try:
-        conn = sqlite3.connect(
-            DB_FILE,
-            detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
-            check_same_thread=False,
-            timeout=10.0  # 10 second timeout to prevent indefinite blocking
-        )
-        conn.row_factory = sqlite3.Row
-        try:
-            conn.execute("PRAGMA foreign_keys = ON;")
-        except Exception:
-            pass
-        return conn
-    except sqlite3.OperationalError as e:
-        raise Exception(f"Database connection failed: {e}. Please check if the database is locked or accessible.")
-
-def close_all_db_connections():
-    # No-op now; kept for compatibility
-    pass
-
-def close_all_db_connections_if_any():
-    # No-op now; kept for compatibility
-    pass
-
 def init_users_db():
     """Initialize users and authentication tables"""
     conn = get_db_connection()
@@ -1229,7 +1086,6 @@ def init_users_db():
     """)
     
     # Check if allowed_pages column exists, if not add it
-    cur.execute("PRAGMA table_info(users)")
     columns = [col[1] for col in cur.fetchall()]
     if 'allowed_pages' not in columns:
         cur.execute("ALTER TABLE users ADD COLUMN allowed_pages TEXT")
@@ -1264,7 +1120,6 @@ def ensure_expenses_attachments():
     cur = conn.cursor()
     try:
         # Check if attachments column exists
-        cur.execute("PRAGMA table_info(expenses)")
         columns = [row[1] for row in cur.fetchall()]
         if "attachments" not in columns:
             cur.execute("ALTER TABLE expenses ADD COLUMN attachments TEXT")
@@ -1337,7 +1192,6 @@ def migrate_trailer_history_add_truck_id(conn):
     cur = conn.cursor()
 
     # Check existing columns
-    cur.execute("PRAGMA table_info(trailer_truck_history);")
     cols = [r[1] for r in cur.fetchall()]
 
     # 1) Add truck_id column if missing
@@ -1385,35 +1239,14 @@ def migrate_trailer_history_add_truck_id(conn):
 
 init_history_tables()
 
-# Run one-time migration: add truck_id to trailer history and backfill
-try:
-    _conn_mig = get_db_connection()
-    migrate_trailer_history_add_truck_id(_conn_mig)
-    _conn_mig.close()
-except Exception as _mig_err:
-    # Non-fatal: show a small note in Streamlit, continue
-    pass
+# MOVED TO LAZY INITIALIZATION - Database migrations will be called after Streamlit starts
+# to avoid issues with secrets not being available yet
 
-# MOVED TO LAZY INITIALIZATION - Called after Streamlit starts
-# init_history_tables()
-
-# MOVED TO LAZY INITIALIZATION - Run one-time migration: add truck_id to trailer history and backfill
-# try:
-#     _conn_mig = get_db_connection()
-#     migrate_trailer_history_add_truck_id(_conn_mig)
-#     _conn_mig.close()
-# except Exception as _mig_err:
-#     # Non-fatal: show a small note in Streamlit, continue
-#     try:
-#     st.warning(f"Trailer history migration check failed: {_mig_err}")
-#     except Exception:
-#     pass
-
-# MOVED TO LAZY INITIALIZATION - Now that DB helpers and schema exist, create default categories
-# ensure_default_expense_categories()
-# ensure_maintenance_category()
-
-ensure_trailer_truck_link()
+# Note: The following will be called during lazy initialization:
+# - init_history_tables()
+# - ensure_default_expense_categories()
+# - ensure_maintenance_category()
+# - ensure_trailer_truck_link()
 
 # -------------------------
 # Dispatchers table & mapping (new)
@@ -1508,7 +1341,7 @@ def ensure_truck_dispatcher_link():
 # ensure_dispatcher_tables()
     try:
         cur.execute("ALTER TABLE trucks ADD COLUMN dispatcher_id INTEGER")
-    except sqlite3.OperationalError:
+    except Exception:
         # column already exists
         pass
     conn.commit()
@@ -1517,34 +1350,10 @@ def ensure_truck_dispatcher_link():
 ensure_truck_dispatcher_link()
 
 # -------------------------
-# Backup / Restore helpers
+# Backup / Restore helpers (NOT APPLICABLE TO POSTGRESQL/NEON)
 # -------------------------
-def backup_db_file_bytes():
-    """Return binary bytes of the sqlite DB file for download"""
-    with open(DB_FILE, 'rb') as f:
-        return f.read()
-
-def export_sql_dump_bytes():
-    """Return SQL dump (utf-8 bytes) of the DB"""
-    conn = sqlite3.connect(DB_FILE)
-    dump_io = io.StringIO()
-    for line in conn.iterdump():
-        dump_io.write('%s\n' % line)
-    conn.close()
-    return dump_io.getvalue().encode('utf-8')
-
-def restore_db_from_bytes(db_bytes):
-    """Overwrite current DB file with uploaded bytes. Creates a temporary backup first."""
-    backup_name = f"{DB_FILE}.backup_before_restore_{int(datetime.utcnow().timestamp())}"
-    shutil.copyfile(DB_FILE, backup_name)
-    with open(DB_FILE, 'wb') as f:
-        f.write(db_bytes)
-    # re-run migrations to ensure new DB has necessary tables if missing
-    init_database()
-    init_history_tables()
-    ensure_dispatcher_tables()
-    ensure_truck_dispatcher_link()
-    return True
+# Note: PostgreSQL/Neon backups are handled at the database level
+# Use pg_dump or Neon's backup features for database backups
 
 # -------------------------
 # Reset helpers (full + per-table)
@@ -2694,7 +2503,7 @@ elif page == "Trucks":
 
                         st.success("Truck added successfully!")
                         safe_rerun()
-                    except sqlite3.IntegrityError:
+                    except Exception:
                         st.error("Truck number already exists.")
 
 # -------------------------
@@ -2997,7 +2806,7 @@ elif page == "Trailers":
 
                         st.success("Trailer added successfully!")
                         safe_rerun()
-                    except sqlite3.IntegrityError:
+                    except Exception:
                         st.error("Trailer number already exists.")
 
 # -------------------------
@@ -3097,7 +2906,6 @@ elif page == "Expenses":
                 cur_update = conn_update.cursor()
                 
                 # Check if column already exists
-                cur_update.execute("PRAGMA table_info(expenses)")
                 columns = [col[1] for col in cur_update.fetchall()]
                 
                 if 'gallons' not in columns:
@@ -5749,7 +5557,6 @@ elif page == "Settings":
             try:
                 test_conn = sqlite3.connect(live_db)
                 cur = test_conn.cursor()
-                cur.execute("PRAGMA integrity_check;")
                 result = cur.fetchone()
                 cur.close()
                 test_conn.close()
@@ -6156,7 +5963,6 @@ elif page == "Reports":
     def column_exists(table: str, column: str) -> bool:
         try:
             c = get_db_connection().cursor()
-            c.execute(f"PRAGMA table_info({table});")
             cols = [r[1] for r in c.fetchall()]
             return column in cols
         except Exception:
