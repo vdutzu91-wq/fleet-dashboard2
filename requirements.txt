@@ -1,25 +1,16 @@
-# Fleet Management System - Requirements
-# Python 3.13.9 compatible
-
-# Core Framework
 streamlit>=1.28.0
-
-# Data Processing
 pandas>=2.0.0
+plotly>=5.17.0
 numpy>=1.24.0
 
-# Database
+# PostgreSQL Database (Neon)
 sqlalchemy>=2.0.0
-psycopg[binary]>=3.1.0
+psycopg2-binary>=2.9.9
 
-# Visualization (CRITICAL - was missing)
-plotly>=5.18.0
-
-# Excel Export
-xlsxwriter>=3.1.0
-
-# PDF Generation
+# PDF Generation (Universal - no system dependencies)
 reportlab>=4.0.0
 
-# HTTP Requests (for OpenRouteService API)
+# Optional utilities
 requests>=2.31.0
+openpyxl>=3.1.0  # For Excel export
+xlsxwriter>=3.1.9  # For Excel writing
