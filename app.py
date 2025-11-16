@@ -681,10 +681,10 @@ def ensure_expense_categories_table():
         cur = conn.cursor()
         cur.execute("""
             CREATE TABLE IF NOT EXISTS expense_categories (
-                category_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category_id SERIAL PRIMARY KEY,
                 name TEXT UNIQUE NOT NULL,
-                schema_json TEXT NOT NULL,        -- JSON list of field definitions (excluding Truck Number)
-                default_apply_mode TEXT NOT NULL -- "individual" | "divide" | "exclude"
+                schema_json TEXT NOT NULL,
+                default_apply_mode TEXT NOT NULL
             )
         """)
         # ensure expenses table has metadata and apply_mode columns
@@ -1011,7 +1011,14 @@ def get_table_columns_for_migration(conn, table_name):
     """Get list of column names for a table"""
     try:
         cur = conn.cursor()
-        columns = [row[1] for row in cur.fetchall()]
+        # PostgreSQL: Query information_schema instead of PRAGMA
+        result = cur.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = :table_name
+            ORDER BY ordinal_position
+        """, {"table_name": table_name})
+        columns = [row[0] for row in result.fetchall()]
         return columns
     except Exception:
         return []
@@ -1059,7 +1066,7 @@ def init_users_db():
     # Users table with page permissions
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id SERIAL PRIMARY KEY,
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             full_name TEXT,
@@ -1075,7 +1082,7 @@ def init_users_db():
     # Session logs table (for audit trail)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS session_logs (
-            log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            log_id SERIAL PRIMARY KEY,
             user_id INTEGER,
             username TEXT,
             action TEXT,
@@ -1086,7 +1093,12 @@ def init_users_db():
     """)
     
     # Check if allowed_pages column exists, if not add it
-    columns = [col[1] for col in cur.fetchall()]
+    result = cur.execute("""
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name = 'users'
+    """)
+    columns = [col[0] for col in result.fetchall()]
     if 'allowed_pages' not in columns:
         cur.execute("ALTER TABLE users ADD COLUMN allowed_pages TEXT")
     
@@ -1143,8 +1155,8 @@ def init_history_tables():
 
     cur.execute('''
     CREATE TABLE IF NOT EXISTS loans_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        entity_type TEXT NOT NULL, -- 'truck' or 'trailer'
+        id SERIAL PRIMARY KEY,
+        entity_type TEXT NOT NULL,
         entity_id INTEGER NOT NULL,
         monthly_amount REAL NOT NULL,
         start_date DATE NOT NULL,
@@ -1156,7 +1168,7 @@ def init_history_tables():
 
     cur.execute('''
     CREATE TABLE IF NOT EXISTS trailer_truck_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         trailer_id INTEGER NOT NULL,
         old_truck_id INTEGER,
         new_truck_id INTEGER,
@@ -1169,7 +1181,7 @@ def init_history_tables():
 
     cur.execute('''
     CREATE TABLE IF NOT EXISTS driver_assignment_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         driver_id INTEGER NOT NULL,
         truck_id INTEGER,
         trailer_id INTEGER,
@@ -1191,8 +1203,13 @@ def migrate_trailer_history_add_truck_id(conn):
     """
     cur = conn.cursor()
 
-    # Check existing columns
-    cols = [r[1] for r in cur.fetchall()]
+    # Check existing columns using PostgreSQL information_schema
+    result = cur.execute("""
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name = 'trailer_truck_history'
+    """)
+    cols = [r[0] for r in result.fetchall()]
 
     # 1) Add truck_id column if missing
     if "truck_id" not in cols:
@@ -1207,7 +1224,7 @@ def migrate_trailer_history_add_truck_id(conn):
             WHERE trl.trailer_id = h.trailer_id
         )
         WHERE h.truck_id IS NULL
-          AND (h.end_date IS NULL OR h.end_date = '' OR DATE(h.end_date) > DATE('now'))
+          AND (h.end_date IS NULL OR h.end_date = '' OR h.end_date::date > CURRENT_DATE)
           AND EXISTS (
               SELECT 1 FROM trailers trl WHERE trl.trailer_id = h.trailer_id AND trl.truck_id IS NOT NULL
           );
@@ -1224,7 +1241,7 @@ def migrate_trailer_history_add_truck_id(conn):
         WHERE h.truck_id IS NULL
           AND h.end_date IS NOT NULL
           AND h.end_date <> ''
-          AND (julianday(DATE('now')) - julianday(h.end_date)) BETWEEN 0 AND 7
+          AND (CURRENT_DATE - h.end_date::date) BETWEEN 0 AND 7
           AND EXISTS (
               SELECT 1 FROM trailers trl WHERE trl.trailer_id = h.trailer_id AND trl.truck_id IS NOT NULL
           );
@@ -1258,7 +1275,7 @@ def ensure_dispatcher_tables():
 # ensure_trailer_truck_link()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS dispatchers (
-            dispatcher_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatcher_id SERIAL PRIMARY KEY,
             name TEXT NOT NULL UNIQUE,
             phone TEXT,
             email TEXT,
