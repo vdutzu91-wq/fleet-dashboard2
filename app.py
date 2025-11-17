@@ -112,6 +112,8 @@ class DBConnectionWrapper:
     def __init__(self, sa_connection):
         self.conn = sa_connection
         self._in_transaction = False
+        self._last_result = None
+        self.lastrowid = None
         
     def cursor(self):
         """Return self as cursor (SQLAlchemy connection can execute directly)"""
@@ -128,18 +130,44 @@ class DBConnectionWrapper:
                     placeholder = f":param{i}"
                     query_str = query_str.replace("?", placeholder, 1)
                     named_params[f"param{i}"] = param
-                return self.conn.execute(text(query_str), named_params)
+                result = self.conn.execute(text(query_str), named_params)
             elif isinstance(params, dict):
-                return self.conn.execute(text(str(query)), params)
+                result = self.conn.execute(text(str(query)), params)
+            else:
+                result = self.conn.execute(text(str(query)), params or {})
         else:
-            return self.conn.execute(text(str(query)), params or {})
+            result = self.conn.execute(text(str(query)), params or {})
+        
+        # Store result for fetchone/fetchall and capture lastrowid
+        self._last_result = result
+        
+        # Try to get the last inserted ID for INSERT statements
+        if hasattr(result, 'inserted_primary_key') and result.inserted_primary_key:
+            # For SERIAL columns in PostgreSQL, get the first value
+            self.lastrowid = result.inserted_primary_key[0]
+        elif hasattr(result, 'lastrowid'):
+            self.lastrowid = result.lastrowid
+        else:
+            self.lastrowid = None
+        
+        return result
     
     def fetchone(self):
-        """Compatibility - not used with this wrapper"""
+        """Fetch one row from last result"""
+        if self._last_result:
+            try:
+                return self._last_result.fetchone()
+            except Exception:
+                return None
         return None
     
     def fetchall(self):
-        """Compatibility - not used with this wrapper"""
+        """Fetch all rows from last result"""
+        if self._last_result:
+            try:
+                return self._last_result.fetchall()
+            except Exception:
+                return []
         return []
     
     def commit(self):
@@ -1265,6 +1293,116 @@ init_history_tables()
 # - ensure_maintenance_category()
 # - ensure_trailer_truck_link()
 
+
+# -------------------------
+# Core database initialization
+# -------------------------
+def init_database():
+    """Initialize main database tables with PostgreSQL-compatible syntax"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    # trucks
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS trucks (
+        truck_id SERIAL PRIMARY KEY,
+        number TEXT UNIQUE,
+        make TEXT,
+        model TEXT,
+        year INTEGER,
+        plate TEXT,
+        vin TEXT,
+        status TEXT DEFAULT 'Active',
+        trailer_id INTEGER,
+        driver_id INTEGER,
+        loan_amount REAL DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+    
+    # trailers
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS trailers (
+        trailer_id SERIAL PRIMARY KEY,
+        number TEXT UNIQUE,
+        type TEXT,
+        year INTEGER,
+        plate TEXT,
+        vin TEXT,
+        status TEXT DEFAULT 'Active',
+        loan_amount REAL DEFAULT 0,
+        truck_id INTEGER,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+    
+    # drivers
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS drivers (
+        driver_id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        license_number TEXT,
+        phone TEXT,
+        email TEXT,
+        hire_date DATE,
+        status TEXT DEFAULT 'Active',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+    
+    # expenses
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS expenses (
+        expense_id SERIAL PRIMARY KEY,
+        date DATE NOT NULL,
+        category TEXT NOT NULL,
+        amount REAL NOT NULL,
+        truck_id INTEGER,
+        description TEXT,
+        location TEXT,
+        service_type TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (truck_id) REFERENCES trucks (truck_id)
+    )
+    ''')
+
+    # income
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS income (
+        income_id SERIAL PRIMARY KEY,
+        date DATE NOT NULL,
+        source TEXT NOT NULL,
+        amount REAL NOT NULL,
+        truck_id INTEGER,
+        description TEXT,
+        pickup_date DATE,
+        pickup_address TEXT,
+        delivery_date DATE,
+        delivery_address TEXT,
+        job_reference TEXT,
+        empty_miles REAL,
+        loaded_miles REAL,
+        rpm REAL,
+        driver_name TEXT,
+        broker_number TEXT,
+        tonu TEXT DEFAULT 'N',
+        pickup_city TEXT,
+        pickup_state TEXT,
+        pickup_zip TEXT,
+        delivery_city TEXT,
+        delivery_state TEXT,
+        delivery_zip TEXT,
+        stops INTEGER,
+        pickup_full_address TEXT,
+        delivery_full_address TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (truck_id) REFERENCES trucks (truck_id)
+    )
+    ''')
+
+    conn.commit()
+    conn.close()
+
 # -------------------------
 # Dispatchers table & mapping (new)
 # -------------------------
@@ -1299,7 +1437,7 @@ def ensure_dispatcher_tables():
 def add_dispatcher(name, phone=None, email=None, notes=None):
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("INSERT OR IGNORE INTO dispatchers (name, phone, email, notes) VALUES (?, ?, ?, ?)",
+    cur.execute("INSERT INTO dispatchers (name, phone, email, notes) VALUES (?, ?, ?, ?) ON CONFLICT (name) DO NOTHING",
                 (name.strip(), phone, email, notes))
     conn.commit()
     dispatcher_id = cur.lastrowid
@@ -1343,7 +1481,7 @@ def assign_trucks_to_dispatcher(dispatcher_id, truck_id_list):
     cur = conn.cursor()
     cur.execute("DELETE FROM dispatcher_trucks WHERE dispatcher_id = ?", (dispatcher_id,))
     for tid in set([int(t) for t in truck_id_list if t is not None]):
-        cur.execute("INSERT OR IGNORE INTO dispatcher_trucks (dispatcher_id, truck_id) VALUES (?, ?)", (dispatcher_id, tid))
+        cur.execute("INSERT INTO dispatcher_trucks (dispatcher_id, truck_id) VALUES (?, ?) ON CONFLICT (dispatcher_id, truck_id) DO NOTHING", (dispatcher_id, tid))
     conn.commit()
     conn.close()
 
