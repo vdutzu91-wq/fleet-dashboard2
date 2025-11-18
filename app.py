@@ -1497,13 +1497,47 @@ ensure_dispatcher_tables()
 # Ensure trucks has dispatcher_id column (safe)
 # -------------------------
 def ensure_truck_dispatcher_link():
-# MOVED TO LAZY INITIALIZATION - call to ensure tables exist
-# ensure_dispatcher_tables()
-    try:
-        cur.execute("ALTER TABLE trucks ADD COLUMN dispatcher_id INTEGER")
-    except Exception:
-        # column already exists
-        pass
+    """
+    Optional migration helper – ensure trucks table has dispatcher_id column
+    and (optionally) backfill from dispatcher_trucks if needed.
+    Safe to call multiple times.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    # 1) Add dispatcher_id column to trucks if missing
+    cur.execute("""
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name = 'trucks'
+    """)
+    cols = [r[0] for r in cur.fetchall()]
+    if "dispatcher_id" not in cols:
+        cur.execute("ALTER TABLE trucks ADD COLUMN dispatcher_id INTEGER;")
+
+    # 2) (optional) backfill from dispatcher_trucks if that table exists
+    cur.execute("""
+        SELECT EXISTS (
+            SELECT 1 
+            FROM information_schema.tables 
+            WHERE table_name = 'dispatcher_trucks'
+        )
+    """)
+    has_dt = cur.fetchone()[0]
+    if has_dt:
+        # naive backfill: first dispatcher per truck
+        cur.execute("""
+            UPDATE trucks t
+            SET dispatcher_id = sub.dispatcher_id
+            FROM (
+                SELECT truck_id, MIN(dispatcher_id) AS dispatcher_id
+                FROM dispatcher_trucks
+                GROUP BY truck_id
+            ) AS sub
+            WHERE t.truck_id = sub.truck_id
+            AND (t.dispatcher_id IS NULL);
+        """)
+
     conn.commit()
     conn.close()
 
