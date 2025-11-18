@@ -1430,13 +1430,11 @@ def ensure_dispatcher_tables():
     """)
     # mapping table (many-to-many)
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS dispatcher_trucks (
-            dispatcher_id INTEGER NOT NULL,
-            truck_id INTEGER NOT NULL,
-            PRIMARY KEY (dispatcher_id, truck_id),
-            FOREIGN KEY (dispatcher_id) REFERENCES dispatchers(dispatcher_id) ON DELETE CASCADE,
-            FOREIGN KEY (truck_id) REFERENCES trucks(truck_id) ON DELETE CASCADE
-        )
+    CREATE TABLE IF NOT EXISTS dispatcher_trucks (
+    dispatcher_id INTEGER NOT NULL,
+    truck_id INTEGER NOT NULL,
+    CONSTRAINT dispatcher_trucks_pk PRIMARY KEY (dispatcher_id, truck_id)
+    )
     """)
     conn.commit()
     conn.close()
