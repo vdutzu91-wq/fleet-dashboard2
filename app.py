@@ -142,12 +142,19 @@ class DBConnectionWrapper:
         self._last_result = result
         
         # Try to get the last inserted ID for INSERT statements
-        if hasattr(result, 'inserted_primary_key') and result.inserted_primary_key:
-            # For SERIAL columns in PostgreSQL, get the first value
-            self.lastrowid = result.inserted_primary_key[0]
-        elif hasattr(result, 'lastrowid'):
-            self.lastrowid = result.lastrowid
-        else:
+        try:
+            if hasattr(result, 'inserted_primary_key'):
+                ikp = result.inserted_primary_key
+                if ikp:
+                    self.lastrowid = ikp[0]
+                else:
+                    self.lastrowid = None
+            elif hasattr(result, 'lastrowid'):
+                self.lastrowid = result.lastrowid
+            else:
+                self.lastrowid = None
+        except Exception:
+            # Not an INSERT statement or no primary key
             self.lastrowid = None
         
         return result
