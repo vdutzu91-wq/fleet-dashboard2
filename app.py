@@ -400,10 +400,10 @@ def init_all_tables():
     init_database()              # core tables: trucks, trailers, drivers, expenses, income
     ensure_dispatcher_tables()   # dispatchers + dispatcher_trucks (FKs to trucks)
     ensure_truck_dispatcher_link()  # dispatcher_id column on trucks (FK to dispatchers)
-    #ensure_expenses_attachments()   # your existing migration helper
-    ensure_expense_categories_table()
-    ensure_default_expense_categories()
-    ensure_maintenance_category()
+    # ensure_expenses_attachments()   # your existing migration helper
+    # ensure_expense_categories_table()
+    # ensure_default_expense_categories()
+    # ensure_maintenance_category()
 
 # Actually run the initialization once at import time
 init_all_tables()
