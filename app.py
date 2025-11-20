@@ -395,6 +395,43 @@ def ensure_truck_dispatcher_link():
     
     conn.close()
 
+def ensure_truck_loan_columns():
+    """Add loan-related columns to trucks table if they are missing."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        # Check existing columns
+        cur.execute("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = 'trucks'
+        """)
+        existing = {row[0] for row in cur.fetchall()}
+
+        # Add columns if they don't exist
+        if "loan_amount" not in existing:
+            cur.execute("ALTER TABLE trucks ADD COLUMN loan_amount NUMERIC;")
+
+        if "loan_start_date" not in existing:
+            cur.execute("ALTER TABLE trucks ADD COLUMN loan_start_date DATE;")
+
+        if "loan_term_months" not in existing:
+            cur.execute("ALTER TABLE trucks ADD COLUMN loan_term_months INTEGER;")
+
+        if "created_at" not in existing:
+            cur.execute("ALTER TABLE trucks ADD COLUMN created_at TIMESTAMP DEFAULT NOW();")
+
+        conn.commit()
+    except Exception as e:
+        # Non-fatal; log if you want
+        print(f"ensure_truck_loan_columns() warning: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+    finally:
+        conn.close()
+
 # ============================================================================
 # INITIALIZE DATABASE SCHEMA (tables & relationships)
 # ============================================================================
@@ -2253,6 +2290,8 @@ def initialize_database_lazy():
             # 1. Initialize core schema: trucks, trailers, drivers, income/expenses,
             #    dispatchers, dispatcher_trucks, trucks.dispatcher_id
             init_all_tables()
+
+            ensure_truck_loan_columns()
             
             # 2. Initialize user authentication tables
             init_users_db()
@@ -2488,36 +2527,38 @@ elif page == "Trucks":
 
     # Helper: current trailer per truck, based on trailers.truck_id
     def get_trucks_with_names_by_trailer_link():
-        conn = get_db_connection()
-        df = pd.read_sql_query(
-            """
-            SELECT 
-                t.truck_id,
-                t.number AS truck_number,
-                t.make,
-                t.model,
-                t.year,
-                t.plate,
-                t.vin,
-                t.status,
-                -- trailer linked by trailers.truck_id
-                tr.trailer_id,
-                tr.number AS trailer_number,
-                d.name AS driver_name,
-                disp.name AS dispatcher_name,
-                t.loan_amount,
-                t.loan_start_date,
-                t.loan_term_months,
-                t.created_at
-            FROM trucks t
-            LEFT JOIN trailers tr ON tr.truck_id = t.truck_id
-            LEFT JOIN drivers d ON t.driver_id = d.driver_id
-            LEFT JOIN dispatchers disp ON t.dispatcher_id = disp.dispatcher_id
-            ORDER BY t.number
-            """,
-            conn,
-        )
-        conn.close()
+        conn = get_raw_db_connection()
+        try:
+            df = pd.read_sql_query(
+                """
+                SELECT 
+                    t.truck_id,
+                    t.number AS truck_number,
+                    t.make,
+                    t.model,
+                    t.year,
+                    t.plate,
+                    t.vin,
+                    t.status,
+                    -- trailer linked by trailers.truck_id
+                    tr.trailer_id,
+                    tr.number AS trailer_number,
+                    d.name AS driver_name,
+                    disp.name AS dispatcher_name,
+                    t.loan_amount,
+                    t.loan_start_date,
+                    t.loan_term_months,
+                    t.created_at
+                FROM trucks t
+                LEFT JOIN trailers tr ON tr.truck_id = t.truck_id
+                LEFT JOIN drivers d ON t.driver_id = d.driver_id
+                LEFT JOIN dispatchers disp ON t.dispatcher_id = disp.dispatcher_id
+                ORDER BY t.number
+                """,
+                conn,
+            )
+        finally:
+            conn.close()
         for col in ("trailer_number", "driver_name", "dispatcher_name"):
             if col in df.columns:
                 df[col] = df[col].fillna("Not Assigned")
@@ -2525,16 +2566,18 @@ elif page == "Trucks":
 
     # Helper: list of trailers for selection
     def get_all_trailers():
-        conn = get_db_connection()
-        tdf = pd.read_sql_query(
-            """
-            SELECT trailer_id, number, truck_id
-            FROM trailers
-            ORDER BY number
-            """,
-            conn,
-        )
-        conn.close()
+        conn = get_raw_db_connection()
+        try:
+            tdf = pd.read_sql_query(
+                """
+                SELECT trailer_id, number, truck_id
+                FROM trailers
+                ORDER BY number
+                """,
+                conn,
+            )
+        finally:
+            conn.close()
         return tdf
 
     with tab1:
@@ -2600,13 +2643,15 @@ elif page == "Trucks":
                     st.subheader("Edit Truck Details")
 
                     # Get raw current IDs for selectbox defaults
-                    conn_pref_ids = get_db_connection()
-                    raw_ids = pd.read_sql_query(
-                        "SELECT driver_id, dispatcher_id, loan_amount, year FROM trucks WHERE truck_id = ?",
-                        conn_pref_ids,
-                        params=(int(selected_truck),)
-                    )
-                    conn_pref_ids.close()
+                    conn_pref_ids = get_raw_db_connection()
+                    try:
+                        raw_ids = pd.read_sql_query(
+                            "SELECT driver_id, dispatcher_id, loan_amount, year FROM trucks WHERE truck_id = %s",
+                            conn_pref_ids,
+                            params=(int(selected_truck),)
+                        )
+                    finally:
+                        conn_pref_ids.close()
                     raw_driver_id = int(raw_ids.iloc[0]["driver_id"]) if not raw_ids.empty and pd.notna(raw_ids.iloc[0]["driver_id"]) else None
                     raw_dispatcher_id = int(raw_ids.iloc[0]["dispatcher_id"]) if not raw_ids.empty and pd.notna(raw_ids.iloc[0]["dispatcher_id"]) else None
                     raw_loan_amount = float(raw_ids.iloc[0]["loan_amount"]) if not raw_ids.empty and pd.notna(raw_ids.iloc[0]["loan_amount"]) else 0.0
@@ -2631,20 +2676,22 @@ elif page == "Trucks":
                         )
                         new_loan = st.number_input("Loan Amount (monthly)", value=raw_loan_amount, min_value=0.0)
 
-                        # Loan history widgets (unchanged)
-                        conn_pref = get_db_connection()
-                        df_open = pd.read_sql_query(
-                            """
-                            SELECT id, monthly_amount, DATE(start_date) AS s
-                            FROM loans_history
-                            WHERE entity_type='truck' AND entity_id=? AND (end_date IS NULL OR end_date = '')
-                            ORDER BY DATE(start_date) DESC
-                            LIMIT 1
-                            """,
-                            conn_pref,
-                            params=(int(selected_truck),),
-                        )
-                        conn_pref.close()
+                        # Loan history widgets
+                        conn_pref = get_raw_db_connection()
+                        try:
+                            df_open = pd.read_sql_query(
+                                """
+                                SELECT id, monthly_amount, DATE(start_date) AS s
+                                FROM loans_history
+                                WHERE entity_type='truck' AND entity_id=%s AND (end_date IS NULL OR end_date = '')
+                                ORDER BY DATE(start_date) DESC
+                                LIMIT 1
+                                """,
+                                conn_pref,
+                                params=(int(selected_truck),),
+                            )
+                        finally:
+                            conn_pref.close()
 
                         today_d = date.today()
                         pref_start = today_d
