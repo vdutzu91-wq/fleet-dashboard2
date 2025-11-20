@@ -2046,41 +2046,49 @@ def get_trucks():
     return df
 
 def get_trailers():
-    conn = get_db_connection()
-    df = pd.read_sql_query("SELECT * FROM trailers ORDER BY number", conn)
-    conn.close()
+    conn = get_raw_db_connection()
+    try:
+        df = pd.read_sql_query("SELECT * FROM trailers ORDER BY number", conn)
+    finally:
+        conn.close()
     return df
 
 def get_drivers():
-    conn = get_db_connection()
-    df = pd.read_sql_query("SELECT * FROM drivers ORDER BY name", conn)
-    conn.close()
+    conn = get_raw_db_connection()
+    try:
+        df = pd.read_sql_query("SELECT * FROM drivers ORDER BY name", conn)
+    finally:
+        conn.close()
     return df
 
 def get_expenses():
-    conn = get_db_connection()
-    df = pd.read_sql_query("""
-        SELECT e.*, t.number as truck_number 
-        FROM expenses e 
-        LEFT JOIN trucks t ON e.truck_id = t.truck_id 
-        ORDER BY e.date DESC
-    """, conn)
-    conn.close()
+    conn = get_raw_db_connection()
+    try:
+        df = pd.read_sql_query("""
+            SELECT e.*, t.number as truck_number 
+            FROM expenses e 
+            LEFT JOIN trucks t ON e.truck_id = t.truck_id 
+            ORDER BY e.date DESC
+        """, conn)
+    finally:
+        conn.close()
     return df
 
 def get_income():
-    conn = get_db_connection()
-    df = pd.read_sql_query("""
-        SELECT i.*, t.number as truck_number 
-        FROM income i 
-        LEFT JOIN trucks t ON i.truck_id = t.truck_id 
-        ORDER BY i.date DESC
-    """, conn)
-    conn.close()
+    conn = get_raw_db_connection()
+    try:
+        df = pd.read_sql_query("""
+            SELECT i.*, t.number as truck_number 
+            FROM income i 
+            LEFT JOIN trucks t ON i.truck_id = t.truck_id 
+            ORDER BY i.date DESC
+        """, conn)
+    finally:
+        conn.close()
     return df
 
 def delete_record(table, id_column, record_id):
-    conn = get_db_connection()
+    conn = get_db_connection()  # Keep wrapped - uses cursor
     cur = conn.cursor()
     cur.execute(f"DELETE FROM {table} WHERE {id_column} = ?", (record_id,))
     conn.commit()
@@ -2135,6 +2143,9 @@ def safe_read_sql(query, conn, params=None):
     Execute a SQL query safely and return a DataFrame.
     - Returns empty DataFrame on any error (and logs to Streamlit if available).
     - params: optional list/tuple for parameterized queries.
+    
+    NOTE: Pass a RAW connection (get_raw_db_connection()) to this function,
+    not the wrapped one, since it uses pd.read_sql_query internally.
     """
     try:
         if params is None:
@@ -2153,7 +2164,7 @@ def safe_read_sql(query, conn, params=None):
 def safe_rerun():
     try:
         import streamlit as st
-        st.experimental_rerun()
+        st.rerun()  # Updated to st.rerun() (st.experimental_rerun is deprecated)
     except Exception:
         pass
 
