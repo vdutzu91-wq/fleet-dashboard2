@@ -2225,49 +2225,33 @@ def initialize_database_lazy():
     Uses session state to ensure it only runs once per session.
     Includes proper error handling and user feedback.
     """
-    # Check if already initialized
     if st.session_state.get("db_initialized", False):
         return True
     
     try:
-        # Show spinner during initialization
         with st.spinner("🔄 Initializing database... This should only take a moment."):
-            # 1. Initialize core database schema
-            init_database()
+            # 1. Initialize core schema: trucks, trailers, drivers, income/expenses,
+            #    dispatchers, dispatcher_trucks, trucks.dispatcher_id
+            init_all_tables()
             
-            # 2. Run database migrations
-            # run_database_migrations()
-            
-            # 3. Initialize user authentication tables
+            # 2. Initialize user authentication tables
             init_users_db()
             
-            # 4. Initialize history tables
+            # 3. Initialize history tables
             init_history_tables()
             
-            # 5. Run trailer history migration
+            # 4. Run trailer history migration
             try:
                 _conn_mig = get_db_connection()
                 migrate_trailer_history_add_truck_id(_conn_mig)
                 _conn_mig.close()
             except Exception as mig_err:
-                # Non-fatal migration error
                 st.warning(f"⚠️ Minor migration issue (non-critical): {mig_err}")
             
-            # 6. Ensure default expense categories exist
-            ensure_default_expense_categories()
-            ensure_maintenance_category()
-            
-            # 7. Ensure column additions
-            ensure_trailer_truck_link()
-            ensure_dispatcher_tables()
-            ensure_truck_dispatcher_link()
-            
-            # 8. Seed existing loans if needed
+            # 5. Seed existing loans if needed
             seed_existing_loans_start()
             
-            # Mark as initialized
             st.session_state.db_initialized = True
-            
             return True
             
     except Exception as e:
