@@ -406,7 +406,7 @@ def init_all_tables():
     # ensure_maintenance_category()
 
 # Actually run the initialization once at import time
-init_all_tables()
+# init_all_tables()
 
 # ============================================================================
 import hashlib
