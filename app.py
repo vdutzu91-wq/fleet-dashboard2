@@ -2236,7 +2236,7 @@ def initialize_database_lazy():
             init_database()
             
             # 2. Run database migrations
-            run_database_migrations()
+            # run_database_migrations()
             
             # 3. Initialize user authentication tables
             init_users_db()
