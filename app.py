@@ -204,6 +204,13 @@ def get_db_connection():
     """Get database connection with SQLite compatibility"""
     return DBConnectionWrapper(_get_db_connection_original())
 
+def get_raw_db_connection():
+    """
+    Get the underlying SQLAlchemy connection for libraries like pandas.read_sql_query
+    that expect a DB-API / SQLAlchemy connectable.
+    """
+    return _get_db_connection_original()
+
 def init_database():
     """Initialize main database tables with PostgreSQL-compatible syntax.
     MUST be called FIRST before any other table-creation functions."""
@@ -2031,9 +2038,11 @@ def record_driver_assignment(driver_id: int, truck_id: int=None, trailer_id: int
 # Simple getters
 # -------------------------
 def get_trucks():
-    conn = get_db_connection()
-    df = pd.read_sql_query("SELECT * FROM trucks ORDER BY number", conn)
-    conn.close()
+    conn = get_raw_db_connection()
+    try:
+        df = pd.read_sql_query("SELECT * FROM trucks ORDER BY number", conn)
+    finally:
+        conn.close()
     return df
 
 def get_trailers():
