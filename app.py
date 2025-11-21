@@ -3024,19 +3024,22 @@ elif page == "Trailers":
                         )
 
                         # --- Trailer loan start/end controls ---
-                        conn_pref_tr = get_db_connection()
-                        df_open_tr = pd.read_sql_query(
-                            """
-                            SELECT id, monthly_amount, DATE(start_date) AS s
-                            FROM loans_history
-                            WHERE entity_type='trailer' AND entity_id=? AND (end_date IS NULL OR end_date = '')
-                            ORDER BY DATE(start_date) DESC
-                            LIMIT 1
-                            """,
-                            conn_pref_tr,
-                            params=(int(selected_trailer),),
-                        )
-                        conn_pref_tr.close()
+                        conn_pref_tr = get_raw_db_connection()
+                        try:
+                            df_open_tr = pd.read_sql_query(
+                                """
+                                SELECT id, monthly_amount, DATE(start_date) AS s
+                                FROM loans_history
+                                WHERE entity_type='trailer' AND entity_id=%s 
+                                  AND (end_date IS NULL OR end_date = '' OR end_date::date > CURRENT_DATE)
+                                ORDER BY DATE(start_date) DESC
+                                LIMIT 1
+                                """,
+                                conn_pref_tr,
+                                params=(int(selected_trailer),),
+                            )
+                        finally:
+                            conn_pref_tr.close()
 
                         # Safe prefill
                         today_d = date.today()
