@@ -2757,12 +2757,19 @@ elif page == "Trucks":
                             loan_end_input = loan_start_input
 
                         # Driver selector
-                        drivers_df = get_drivers()
-                        driver_options = ["No Driver Assigned"] + [
-                            f"{r['name']} ({r['license_number'] or ''})"
-                            for _, r in drivers_df.iterrows()
-                        ]
-                        driver_ids = [None] + drivers_df["driver_id"].tolist()
+                        drivers = get_drivers()  # list[dict] or DataFrame; handle both
+                        driver_options = ["No Driver Assigned"]
+                        driver_ids = [None]
+
+                        if isinstance(drivers, list):
+                            for d in drivers:
+                                driver_options.append(f"{d.get('name','')} ({d.get('license_number') or ''})")
+                                driver_ids.append(d.get("driver_id"))
+                        else:
+                            # assume DataFrame
+                            for _, r in drivers.iterrows():
+                                driver_options.append(f"{r['name']} ({r.get('license_number') or ''})")
+                                driver_ids.append(r["driver_id"])
                         current_driver_idx = 0
                         if raw_driver_id:
                             try:
@@ -2777,22 +2784,22 @@ elif page == "Trucks":
                         )
                         new_driver_id = driver_ids[selected_driver_idx]
 
-                        # Dispatcher selector
-                        dispatchers = get_all_dispatchers()
-                        dispatcher_options = ["No Dispatcher Assigned"] + [
-                            d["name"] for d in dispatchers
-                        ]
-                        dispatcher_ids = [None] + [
-                            d["dispatcher_id"] for d in dispatchers
-                        ]
+                        # Dispatcher selector (get_all_dispatchers returns list of dicts)
+                        dispatchers = get_all_dispatchers()  # list[dict]
+                        dispatcher_options = ["No Dispatcher Assigned"]
+                        dispatcher_ids = [None]
+
+                        for d in dispatchers:
+                            dispatcher_options.append(d.get("name", "Unnamed"))
+                            dispatcher_ids.append(d.get("dispatcher_id"))
+
                         current_dispatcher_idx = 0
-                        if raw_dispatcher_id:
+                        if raw_dispatcher_id is not None:
                             try:
-                                current_dispatcher_idx = dispatcher_ids.index(
-                                    raw_dispatcher_id
-                                )
+                                current_dispatcher_idx = dispatcher_ids.index(raw_dispatcher_id)
                             except ValueError:
                                 current_dispatcher_idx = 0
+
                         selected_dispatcher_idx = st.selectbox(
                             "Assigned Dispatcher",
                             range(len(dispatcher_options)),
@@ -2972,12 +2979,15 @@ elif page == "Trucks":
             )
             driver_id = driver_ids[selected_driver_idx]
 
-            # dispatcher selection
+            # dispatcher selection (list[dict])
             dispatchers = get_all_dispatchers()
-            dispatcher_options = ["No Dispatcher Assigned"] + [
-                d["name"] for d in dispatchers
-            ]
-            dispatcher_ids = [None] + [d["dispatcher_id"] for d in dispatchers]
+            dispatcher_options = ["No Dispatcher Assigned"]
+            dispatcher_ids = [None]
+
+            for d in dispatchers:
+                dispatcher_options.append(d.get("name", "Unnamed"))
+                dispatcher_ids.append(d.get("dispatcher_id"))
+
             selected_dispatcher_idx = st.selectbox(
                 "Assigned Dispatcher",
                 range(len(dispatcher_options)),
