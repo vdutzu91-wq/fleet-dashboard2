@@ -1006,22 +1006,33 @@ def get_expense_categories():
 
 def add_or_update_expense_category(name, field_list, default_apply_mode="individual"):
     """
-    field_list: list of dicts, each dict: {"key": "card_number", "label": "Card Number", "type": "text"}
-    Note: user-visible fields exclude the leading 'truck_number' which is always implicit.
+    Insert or update an expense category by name.
+    Uses PostgreSQL UPSERT so we don't have to juggle transactions manually.
     """
-    ensure_expense_categories_table()
+    import json
+    schema_json = json.dumps(field_list)
+
     conn = get_db_connection()
+    cur = conn.cursor()
     try:
-        cur = conn.cursor()
-        schema_json = json.dumps(field_list)
-        # try update then insert
-        try:
-            cur.execute("INSERT INTO expense_categories (name, schema_json, default_apply_mode) VALUES (?, ?, ?)",
-                        (name, schema_json, default_apply_mode))
-        except Exception:
-            cur.execute("UPDATE expense_categories SET schema_json=?, default_apply_mode=? WHERE name=?",
-                        (schema_json, default_apply_mode, name))
+        cur.execute(
+            """
+            INSERT INTO expense_categories (name, schema_json, default_apply_mode)
+            VALUES (?, ?, ?)
+            ON CONFLICT (name) DO UPDATE
+            SET schema_json = EXCLUDED.schema_json,
+                default_apply_mode = EXCLUDED.default_apply_mode
+            """,
+            (name, schema_json, default_apply_mode),
+        )
         conn.commit()
+    except Exception as e:
+        # Optional: log or show a small warning, but don't leave txn open
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
     finally:
         conn.close()
 
