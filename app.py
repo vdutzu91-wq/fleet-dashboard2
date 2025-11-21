@@ -89,9 +89,18 @@ def get_db_engine():
     
     return _db_engine
 
-def get_db_connection():
-    """Get database connection"""
+# --- Raw vs wrapped connections ---
+
+def _get_raw_db_connection_internal():
+    """Low-level helper: ALWAYS returns a raw SQLAlchemy connection."""
     return get_db_engine().connect()
+
+def get_raw_db_connection():
+    """
+    Public helper: raw SQLAlchemy connection.
+    Use this with pandas.read_sql_query and anything that needs a DB-API / SQLAlchemy connectable.
+    """
+    return _get_raw_db_connection_internal()
 
 def close_all_db_connections():
     """Close database connections"""
@@ -193,27 +202,17 @@ class DBConnectionWrapper:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
-def get_db_connection_compat():
-    """Get wrapped database connection for compatibility"""
-    return DBConnectionWrapper(get_db_connection())
-
-# Override get_db_connection to return wrapped version
-_get_db_connection_original = get_db_connection
-
 def get_db_connection():
-    """Get database connection with SQLite compatibility"""
-    return DBConnectionWrapper(_get_db_connection_original())
-
-def get_raw_db_connection():
     """
-    Get the underlying SQLAlchemy connection for libraries like pandas.read_sql_query
-    that expect a DB-API / SQLAlchemy connectable.
+    Public helper: sqlite-style wrapped connection.
+    Use this in code that does:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT ... WHERE id = ?", (id,))
+    DO NOT use this with pandas.read_sql_query.
     """
-    return _get_db_connection_original()
+    return DBConnectionWrapper(_get_raw_db_connection_internal())
 
-def init_database():
-    """Initialize main database tables with PostgreSQL-compatible syntax.
-    MUST be called FIRST before any other table-creation functions."""
     conn = get_db_connection()
     cur = conn.cursor()
     
@@ -887,21 +886,6 @@ def calculate_distance_miles(start_address: str, end_address: str, debug=False) 
             st.error(f"Unexpected error: {e}")
         return 0.0
 
-def save_uploaded_file_to_base64(uploaded_file):
-    """Convert uploaded file to base64 for storage"""
-    try:
-        import base64
-        file_bytes = uploaded_file.read()
-        encoded = base64.b64encode(file_bytes).decode('utf-8')
-        return {
-            'filename': uploaded_file.name,
-            'content_type': uploaded_file.type,
-            'data': encoded
-        }
-    except Exception as e:
-        st.error(f"Error processing file {uploaded_file.name}: {e}")
-        return None
-
 def get_preset_date_range(preset):
     """Get date range based on preset selection"""
     today = date.today()
@@ -935,23 +919,6 @@ def get_preset_date_range(preset):
         return date(2000, 1, 1), today
     else:
         return today.replace(month=1, day=1), today
-
-def ensure_expenses_attachments():
-    """Ensure expenses table has attachments column"""
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # Check if attachments column exists
-        columns = [col[1] for col in cur.fetchall()]
-        
-        if 'attachments' not in columns:
-            cur.execute("ALTER TABLE expenses ADD COLUMN attachments TEXT DEFAULT '[]'")
-            conn.commit()
-        
-        conn.close()
-    except Exception as e:
-        st.error(f"Error ensuring attachments column: {e}")
 
 # -------------------------
 # Expense categories and metadata (DB migration + helpers)
@@ -1177,21 +1144,6 @@ def close_all_db_connections_if_any():
         pass
 
     # If you maintain any other persistent resources, add cleanup code here.
-
-### Safe rerun helper: call this instead of st.experimental_rerun()
-def safe_rerun():
-    # prefer Streamlit's built-in experimental rerun if available
-    if hasattr(st, "experimental_rerun"):
-        try:
-            st.experimental_rerun()
-            return
-        except Exception:
-            # fall through to fallback
-            pass
-
-    # Fallback: toggle a small session_state flag to trigger a rerun, then stop the current run
-    st.session_state["_rerun_trigger"] = not st.session_state.get("_rerun_trigger", False)
-    st.stop()
 
 # -------------------------
 # Attachment helpers
@@ -1421,17 +1373,26 @@ def init_users_db():
 # Expenses attachments & indexes (add near your ensure_expenses_table function)
 # -------------------------
 def ensure_expenses_attachments():
-    """Add attachments column to expenses table if it doesn't exist, and create indexes for performance."""
+    """
+    Ensure expenses table has an attachments column, and add useful indexes.
+    Safe to run multiple times.
+    """
     conn = get_db_connection()
     cur = conn.cursor()
     try:
         # Check if attachments column exists
-        columns = [row[1] for row in cur.fetchall()]
+        cur.execute("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = 'expenses'
+        """)
+        columns = {row[0] for row in cur.fetchall()}
+
         if "attachments" not in columns:
-            cur.execute("ALTER TABLE expenses ADD COLUMN attachments TEXT")
+            cur.execute("ALTER TABLE expenses ADD COLUMN attachments TEXT DEFAULT '[]'")
             conn.commit()
-        
-        # Create indexes for common queries (safe to run multiple times)
+
+        # Indexes (idempotent)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(date)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_expenses_category ON expenses(category)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_expenses_truck_id ON expenses(truck_id)")
@@ -1518,7 +1479,10 @@ def migrate_trailer_history_add_truck_id(conn):
             WHERE trl.trailer_id = h.trailer_id
         )
         WHERE h.truck_id IS NULL
-          AND (h.end_date IS NULL OR h.end_date = '' OR h.end_date::date > CURRENT_DATE)
+          AND (
+                h.end_date IS NULL
+                OR (CAST(h.end_date AS TEXT) <> '' AND h.end_date::date > CURRENT_DATE)
+              )
           AND EXISTS (
               SELECT 1 FROM trailers trl WHERE trl.trailer_id = h.trailer_id AND trl.truck_id IS NOT NULL
           );
@@ -1534,7 +1498,7 @@ def migrate_trailer_history_add_truck_id(conn):
         )
         WHERE h.truck_id IS NULL
           AND h.end_date IS NOT NULL
-          AND h.end_date <> ''
+          AND CAST(h.end_date AS TEXT) <> ''
           AND (CURRENT_DATE - h.end_date::date) BETWEEN 0 AND 7
           AND EXISTS (
               SELECT 1 FROM trailers trl WHERE trl.trailer_id = h.trailer_id AND trl.truck_id IS NOT NULL
@@ -1547,8 +1511,6 @@ def migrate_trailer_history_add_truck_id(conn):
     cur.execute("CREATE INDEX IF NOT EXISTS idx_tth_dates      ON trailer_truck_history(start_date, end_date)")
 
     conn.commit()
-
-init_history_tables()
 
 # MOVED TO LAZY INITIALIZATION - Database migrations will be called after Streamlit starts
 # to avoid issues with secrets not being available yet
@@ -1689,11 +1651,13 @@ def ensure_dispatcher_tables():
     """)
     # mapping table (many-to-many)
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS dispatcher_trucks (
-    dispatcher_id INTEGER NOT NULL,
-    truck_id INTEGER NOT NULL,
-    CONSTRAINT dispatcher_trucks_pk PRIMARY KEY (dispatcher_id, truck_id)
-    )
+        CREATE TABLE IF NOT EXISTS dispatcher_trucks (
+            dispatcher_id INTEGER NOT NULL,
+            truck_id INTEGER NOT NULL,
+            CONSTRAINT dispatcher_trucks_pk PRIMARY KEY (dispatcher_id, truck_id),
+            FOREIGN KEY (dispatcher_id) REFERENCES dispatchers(dispatcher_id) ON DELETE CASCADE,
+            FOREIGN KEY (truck_id) REFERENCES trucks(truck_id) ON DELETE CASCADE
+        )
     """)
     conn.commit()
     conn.close()
@@ -2210,11 +2174,26 @@ def safe_read_sql(query, conn, params=None):
         return pd.DataFrame()
 
 def safe_rerun():
-    try:
-        import streamlit as st
-        st.rerun()  # Updated to st.rerun() (st.experimental_rerun is deprecated)
-    except Exception:
-        pass
+    """Trigger a rerun in Streamlit safely."""
+    # New API
+    if hasattr(st, "rerun"):
+        try:
+            st.rerun()
+            return
+        except Exception:
+            pass
+
+    # Backwards compatibility
+    if hasattr(st, "experimental_rerun"):
+        try:
+            st.experimental_rerun()
+            return
+        except Exception:
+            pass
+
+    # Fallback: toggle a flag
+    st.session_state["_rerun_trigger"] = not st.session_state.get("_rerun_trigger", False)
+    st.stop()
 
 # -------------------------
 # Aggregated loan totals per truck (truck + linked trailers) using history
@@ -2270,16 +2249,9 @@ def seed_existing_loans_start():
     conn.commit()
     conn.close()
 
-# call seed once (safe - checks for existing entries)
-seed_existing_loans_start()
-
 # -------------------------
 # Streamlit setup
 # -------------------------
-# MOVED TO LAZY INITIALIZATION - call seed once (safe - checks for existing entries)
-# seed_existing_loans_start()
-
-
 # ====================================================================
 # LAZY DATABASE INITIALIZATION
 # ====================================================================
