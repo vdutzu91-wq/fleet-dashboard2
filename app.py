@@ -2542,6 +2542,7 @@ elif page == "Trucks":
             )
         finally:
             conn.close()
+
         for col in ("trailer_number", "driver_name", "dispatcher_name"):
             if col in df.columns:
                 df[col] = df[col].fillna("Not Assigned")
@@ -2567,50 +2568,56 @@ elif page == "Trucks":
         trucks_df = get_trucks_with_names_by_trailer_link()
 
         if not trucks_df.empty:
-            display_df = trucks_df[[
-                "truck_id",
-                "truck_number",
-                "make",
-                "model",
-                "year",
-                "plate",
-                "vin",
-                "status",
-                "trailer_number",
-                "driver_name",
-                "dispatcher_name",
-                "loan_amount",
-                "loan_start_date",
-                "loan_term_months",
-                "created_at",
-            ]].copy()
+            display_df = trucks_df[
+                [
+                    "truck_id",
+                    "truck_number",
+                    "make",
+                    "model",
+                    "year",
+                    "plate",
+                    "vin",
+                    "status",
+                    "trailer_number",
+                    "driver_name",
+                    "dispatcher_name",
+                    "loan_amount",
+                    "loan_start_date",
+                    "loan_term_months",
+                    "created_at",
+                ]
+            ].copy()
 
-            display_df.rename(columns={
-                "truck_number": "Truck #",
-                "trailer_number": "Trailer",
-                "driver_name": "Driver",
-                "dispatcher_name": "Dispatcher",
-                "loan_amount": "Loan Amount",
-                "loan_start_date": "Loan Start",
-                "loan_term_months": "Loan Term (months)",
-                "created_at": "Created At",
-            }, inplace=True)
-
-            display_df["Loan Amount"] = display_df["Loan Amount"].apply(
-                lambda x: f"${x:,.2f}" if pd.notna(x) else "$0.00"
+            display_df.rename(
+                columns={
+                    "truck_number": "Truck #",
+                    "trailer_number": "Trailer",
+                    "driver_name": "Driver",
+                    "dispatcher_name": "Dispatcher",
+                    "loan_amount": "Loan Amount",
+                    "loan_start_date": "Loan Start",
+                    "loan_term_months": "Loan Term (months)",
+                    "created_at": "Created At",
+                },
+                inplace=True,
             )
+
+            if "Loan Amount" in display_df.columns:
+                display_df["Loan Amount"] = display_df["Loan Amount"].apply(
+                    lambda x: f"${x:,.2f}" if pd.notna(x) else "$0.00"
+                )
 
             st.dataframe(display_df, use_container_width=True)
 
             st.subheader("Edit or Delete Truck")
             selected_truck = st.selectbox(
                 "Select Truck",
-                options=trucks_df['truck_id'].tolist(),
+                options=trucks_df["truck_id"].tolist(),
                 format_func=lambda x: f"{trucks_df.loc[trucks_df['truck_id'] == x, 'truck_number'].iloc[0]}",
             )
 
             if selected_truck:
-                row = trucks_df[trucks_df['truck_id'] == selected_truck].iloc[0]
+                row = trucks_df[trucks_df["truck_id"] == selected_truck].iloc[0]
 
                 col1, col2 = st.columns(2)
                 with col1:
@@ -2622,7 +2629,7 @@ elif page == "Trucks":
                         st.success("Truck deleted successfully!")
                         safe_rerun()
 
-                if st.session_state.get('editing_truck') == selected_truck:
+                if st.session_state.get("editing_truck") == selected_truck:
                     st.subheader("Edit Truck Details")
 
                     # Get raw current IDs for selectbox defaults
@@ -2631,33 +2638,56 @@ elif page == "Trucks":
                         raw_ids = pd.read_sql_query(
                             "SELECT driver_id, dispatcher_id, loan_amount, year FROM trucks WHERE truck_id = %s",
                             conn_pref_ids,
-                            params=(int(selected_truck),)
+                            params=(int(selected_truck),),
                         )
                     finally:
                         conn_pref_ids.close()
-                    raw_driver_id = int(raw_ids.iloc[0]["driver_id"]) if not raw_ids.empty and pd.notna(raw_ids.iloc[0]["driver_id"]) else None
-                    raw_dispatcher_id = int(raw_ids.iloc[0]["dispatcher_id"]) if not raw_ids.empty and pd.notna(raw_ids.iloc[0]["dispatcher_id"]) else None
-                    raw_loan_amount = float(raw_ids.iloc[0]["loan_amount"]) if not raw_ids.empty and pd.notna(raw_ids.iloc[0]["loan_amount"]) else 0.0
-                    raw_year = int(raw_ids.iloc[0]["year"]) if not raw_ids.empty and pd.notna(raw_ids.iloc[0]["year"]) else 2020
+
+                    raw_driver_id = (
+                        int(raw_ids.iloc[0]["driver_id"])
+                        if not raw_ids.empty and pd.notna(raw_ids.iloc[0]["driver_id"])
+                        else None
+                    )
+                    raw_dispatcher_id = (
+                        int(raw_ids.iloc[0]["dispatcher_id"])
+                        if not raw_ids.empty and pd.notna(raw_ids.iloc[0]["dispatcher_id"])
+                        else None
+                    )
+                    raw_loan_amount = (
+                        float(raw_ids.iloc[0]["loan_amount"])
+                        if not raw_ids.empty and pd.notna(raw_ids.iloc[0]["loan_amount"])
+                        else 0.0
+                    )
+                    raw_year = (
+                        int(raw_ids.iloc[0]["year"])
+                        if not raw_ids.empty and pd.notna(raw_ids.iloc[0]["year"])
+                        else 2020
+                    )
 
                     # Current trailer by link (from joined row)
-                    current_trailer_id = int(row["trailer_id"]) if "trailer_id" in row and pd.notna(row["trailer_id"]) else None
+                    current_trailer_id = (
+                        int(row["trailer_id"])
+                        if "trailer_id" in row and pd.notna(row["trailer_id"])
+                        else None
+                    )
 
                     with st.form(f"edit_truck_form_{selected_truck}"):
-                        new_number = st.text_input("Truck Number", value=row['truck_number'] or "")
-                        new_make = st.text_input("Make", value=row['make'] or "")
-                        new_model = st.text_input("Model", value=row['model'] or "")
+                        new_number = st.text_input("Truck Number", value=row["truck_number"] or "")
+                        new_make = st.text_input("Make", value=row["make"] or "")
+                        new_model = st.text_input("Model", value=row["model"] or "")
                         new_year = st.number_input("Year", value=raw_year, min_value=1900, max_value=2100)
-                        new_plate = st.text_input("Plate Number", value=row['plate'] or "")
-                        new_vin = st.text_input("VIN", value=row['vin'] or "")
+                        new_plate = st.text_input("Plate Number", value=row["plate"] or "")
+                        new_vin = st.text_input("VIN", value=row["vin"] or "")
                         new_status = st.selectbox(
                             "Status",
                             ["Active", "Inactive", "Maintenance"],
-                            index=["Active", "Inactive", "Maintenance"].index(row['status'])
-                                  if row['status'] in ["Active", "Inactive", "Maintenance"]
-                                  else 0,
+                            index=["Active", "Inactive", "Maintenance"].index(row["status"])
+                            if row["status"] in ["Active", "Inactive", "Maintenance"]
+                            else 0,
                         )
-                        new_loan = st.number_input("Loan Amount (monthly)", value=raw_loan_amount, min_value=0.0)
+                        new_loan = st.number_input(
+                            "Loan Amount (monthly)", value=raw_loan_amount, min_value=0.0
+                        )
 
                         # Loan history widgets
                         conn_pref = get_raw_db_connection()
@@ -2666,7 +2696,9 @@ elif page == "Trucks":
                                 """
                                 SELECT id, monthly_amount, DATE(start_date) AS s
                                 FROM loans_history
-                                WHERE entity_type='truck' AND entity_id=%s AND (end_date IS NULL OR end_date = '')
+                                WHERE entity_type = 'truck'
+                                  AND entity_id = %s
+                                  AND (end_date IS NULL OR CAST(end_date AS TEXT) = '')
                                 ORDER BY DATE(start_date) DESC
                                 LIMIT 1
                                 """,
@@ -2679,9 +2711,13 @@ elif page == "Trucks":
                         today_d = date.today()
                         pref_start = today_d
                         if df_open is not None and not df_open.empty:
-                            raw_s = str(df_open.iloc[0].get("s")) if "s" in df_open.columns else None
+                            raw_s = (
+                                str(df_open.iloc[0].get("s"))
+                                if "s" in df_open.columns
+                                else None
+                            )
                             try:
-                                if raw_s and raw_s != "NaT":
+                                if raw_s and raw_s not in ("NaT", "None"):
                                     pref_start = date.fromisoformat(raw_s)
                             except Exception:
                                 pref_start = today_d
@@ -2723,9 +2759,10 @@ elif page == "Trucks":
                         # Driver selector
                         drivers_df = get_drivers()
                         driver_options = ["No Driver Assigned"] + [
-                            f"{r['name']} ({r['license_number'] or ''})" for _, r in drivers_df.iterrows()
+                            f"{r['name']} ({r['license_number'] or ''})"
+                            for _, r in drivers_df.iterrows()
                         ]
-                        driver_ids = [None] + drivers_df['driver_id'].tolist()
+                        driver_ids = [None] + drivers_df["driver_id"].tolist()
                         current_driver_idx = 0
                         if raw_driver_id:
                             try:
@@ -2742,12 +2779,18 @@ elif page == "Trucks":
 
                         # Dispatcher selector
                         dispatchers = get_all_dispatchers()
-                        dispatcher_options = ["No Dispatcher Assigned"] + [d['name'] for d in dispatchers]
-                        dispatcher_ids = [None] + [d['dispatcher_id'] for d in dispatchers]
+                        dispatcher_options = ["No Dispatcher Assigned"] + [
+                            d["name"] for d in dispatchers
+                        ]
+                        dispatcher_ids = [None] + [
+                            d["dispatcher_id"] for d in dispatchers
+                        ]
                         current_dispatcher_idx = 0
                         if raw_dispatcher_id:
                             try:
-                                current_dispatcher_idx = dispatcher_ids.index(raw_dispatcher_id)
+                                current_dispatcher_idx = dispatcher_ids.index(
+                                    raw_dispatcher_id
+                                )
                             except ValueError:
                                 current_dispatcher_idx = 0
                         selected_dispatcher_idx = st.selectbox(
@@ -2760,12 +2803,16 @@ elif page == "Trucks":
 
                         # Trailer selector (now editable): based on trailers.truck_id link
                         trailers_df = get_all_trailers()
-                        trailer_options = ["No Trailer Assigned"] + trailers_df['number'].astype(str).tolist()
-                        trailer_ids = [None] + trailers_df['trailer_id'].tolist()
+                        trailer_options = ["No Trailer Assigned"] + trailers_df[
+                            "number"
+                        ].astype(str).tolist()
+                        trailer_ids = [None] + trailers_df["trailer_id"].tolist()
                         current_trailer_idx = 0
                         if current_trailer_id:
                             try:
-                                current_trailer_idx = trailer_ids.index(current_trailer_id)
+                                current_trailer_idx = trailer_ids.index(
+                                    current_trailer_id
+                                )
                             except ValueError:
                                 current_trailer_idx = 0
                         selected_trailer_idx = st.selectbox(
@@ -2783,28 +2830,42 @@ elif page == "Trucks":
                             cancelled = st.form_submit_button("❌ Cancel")
 
                     # Handle form actions
-                    if 'editing_truck' in st.session_state and st.session_state.editing_truck == selected_truck:
+                    if (
+                        "editing_truck" in st.session_state
+                        and st.session_state.editing_truck == selected_truck
+                    ):
                         if cancelled:
                             del st.session_state.editing_truck
                             safe_rerun()
 
                         if saved:
                             try:
-                                # Update truck core fields
                                 conn = get_db_connection()
                                 cur = conn.cursor()
+
+                                # Get previous values
                                 cur.execute(
-                                    "SELECT loan_amount, driver_id FROM trucks WHERE truck_id=?",
+                                    "SELECT loan_amount, driver_id FROM trucks WHERE truck_id = %s",
                                     (selected_truck,),
                                 )
                                 prev = cur.fetchone()
                                 prev_driver_id = prev[1] if prev else None
 
+                                # Update truck core fields
                                 cur.execute(
                                     """
                                     UPDATE trucks
-                                    SET number=?, make=?, model=?, year=?, plate=?, vin=?, status=?, loan_amount=?, driver_id=?, dispatcher_id=?
-                                    WHERE truck_id=?
+                                    SET number = %s,
+                                        make = %s,
+                                        model = %s,
+                                        year = %s,
+                                        plate = %s,
+                                        vin = %s,
+                                        status = %s,
+                                        loan_amount = %s,
+                                        driver_id = %s,
+                                        dispatcher_id = %s
+                                    WHERE truck_id = %s
                                     """,
                                     (
                                         new_number,
@@ -2820,20 +2881,35 @@ elif page == "Trucks":
                                         selected_truck,
                                     ),
                                 )
-                                conn.commit()
 
                                 # Update trailer linkage in trailers table
-                                # 1) Unassign this truck from any trailers if "No Trailer Assigned" chosen
                                 if new_trailer_id is None:
-                                    cur.execute("UPDATE trailers SET truck_id = NULL WHERE truck_id = ?", (selected_truck,))
+                                    # Unassign this truck from any trailers
+                                    cur.execute(
+                                        "UPDATE trailers SET truck_id = NULL WHERE truck_id = %s",
+                                        (selected_truck,),
+                                    )
                                 else:
-                                    # 2) Ensure selected trailer points to this truck
-                                    #    First, clear it from any previous truck
-                                    cur.execute("UPDATE trailers SET truck_id = NULL WHERE trailer_id = ?", (new_trailer_id,))
-                                    #    Then link to this truck
-                                    cur.execute("UPDATE trailers SET truck_id = ? WHERE trailer_id = ?", (selected_truck, new_trailer_id))
-                                    # 3) Also ensure no other trailers remain linked to this truck (single trailer per truck policy)
-                                    cur.execute("UPDATE trailers SET truck_id = NULL WHERE truck_id = ? AND trailer_id <> ?", (selected_truck, new_trailer_id))
+                                    # Clear this trailer from any previous truck
+                                    cur.execute(
+                                        "UPDATE trailers SET truck_id = NULL WHERE trailer_id = %s",
+                                        (new_trailer_id,),
+                                    )
+                                    # Link to this truck
+                                    cur.execute(
+                                        "UPDATE trailers SET truck_id = %s WHERE trailer_id = %s",
+                                        (selected_truck, new_trailer_id),
+                                    )
+                                    # Ensure no other trailers remain linked to this truck
+                                    cur.execute(
+                                        """
+                                        UPDATE trailers
+                                        SET truck_id = NULL
+                                        WHERE truck_id = %s AND trailer_id <> %s
+                                        """,
+                                        (selected_truck, new_trailer_id),
+                                    )
+
                                 conn.commit()
                                 conn.close()
 
@@ -2847,7 +2923,9 @@ elif page == "Trucks":
                                         loan_end_input,
                                     )
                                 except Exception as e:
-                                    st.warning(f"Truck loan history update warning: {e}")
+                                    st.warning(
+                                        f"Truck loan history update warning: {e}"
+                                    )
 
                                 # Driver assignment history
                                 if new_driver_id and new_driver_id != prev_driver_id:
@@ -2876,25 +2954,34 @@ elif page == "Trucks":
             plate = st.text_input("Plate Number")
             vin = st.text_input("VIN")
             status = st.selectbox("Status", ["Active", "Inactive", "Maintenance"])
-            loan_amount = st.number_input("Loan Amount (monthly)", min_value=0.0, value=0.0)
+            loan_amount = st.number_input(
+                "Loan Amount (monthly)", min_value=0.0, value=0.0
+            )
 
             # driver selection
             drivers_df = get_drivers()
             driver_options = ["No Driver Assigned"] + [
-                f"{r['name']} ({r['license_number'] or ''})" for _, r in drivers_df.iterrows()
+                f"{r['name']} ({r['license_number'] or ''})"
+                for _, r in drivers_df.iterrows()
             ]
-            driver_ids = [None] + drivers_df['driver_id'].tolist()
+            driver_ids = [None] + drivers_df["driver_id"].tolist()
             selected_driver_idx = st.selectbox(
-                "Assigned Driver", range(len(driver_options)), format_func=lambda x: driver_options[x]
+                "Assigned Driver",
+                range(len(driver_options)),
+                format_func=lambda x: driver_options[x],
             )
             driver_id = driver_ids[selected_driver_idx]
 
             # dispatcher selection
             dispatchers = get_all_dispatchers()
-            dispatcher_options = ["No Dispatcher Assigned"] + [d['name'] for d in dispatchers]
-            dispatcher_ids = [None] + [d['dispatcher_id'] for d in dispatchers]
+            dispatcher_options = ["No Dispatcher Assigned"] + [
+                d["name"] for d in dispatchers
+            ]
+            dispatcher_ids = [None] + [d["dispatcher_id"] for d in dispatchers]
             selected_dispatcher_idx = st.selectbox(
-                "Assigned Dispatcher", range(len(dispatcher_options)), format_func=lambda x: dispatcher_options[x]
+                "Assigned Dispatcher",
+                range(len(dispatcher_options)),
+                format_func=lambda x: dispatcher_options[x],
             )
             dispatcher_id = dispatcher_ids[selected_dispatcher_idx]
 
@@ -2905,18 +2992,32 @@ elif page == "Trucks":
                     try:
                         conn = get_db_connection()
                         cur = conn.cursor()
+                        # Insert truck, return its id (Postgres style)
                         cur.execute(
                             """
                             INSERT INTO trucks (number, make, model, year, plate, vin, status, loan_amount, driver_id, dispatcher_id)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            RETURNING truck_id
                             """,
-                            (number, make, model, year, plate, vin, status, loan_amount, driver_id, dispatcher_id),
+                            (
+                                number,
+                                make,
+                                model,
+                                year,
+                                plate,
+                                vin,
+                                status,
+                                loan_amount,
+                                driver_id,
+                                dispatcher_id,
+                            ),
                         )
-                        truck_id = cur.lastrowid
+                        truck_id_row = cur.fetchone()
+                        truck_id = truck_id_row[0] if truck_id_row else None
                         conn.commit()
                         conn.close()
 
-                        if loan_amount and loan_amount > 0:
+                        if truck_id and loan_amount and loan_amount > 0:
                             try:
                                 upsert_current_loan(
                                     "truck",
@@ -2926,17 +3027,23 @@ elif page == "Trucks":
                                     None,
                                 )
                             except Exception as e:
-                                st.warning(f"Initial loan history warning: {e}")
+                                st.warning(
+                                    f"Initial loan history warning: {e}"
+                                )
 
-                        if driver_id:
+                        if truck_id and driver_id:
                             record_driver_assignment(
-                                driver_id, truck_id=truck_id, start_date=date.today(), note="Assigned on create"
+                                driver_id,
+                                truck_id=truck_id,
+                                start_date=date.today(),
+                                note="Assigned on create",
                             )
 
                         st.success("Truck added successfully!")
                         safe_rerun()
-                    except Exception:
-                        st.error("Truck number already exists.")
+                    except Exception as e:
+                        # Most likely unique number violation, but show message
+                        st.error(f"Failed to add truck (maybe number exists?): {e}")
 
 # -------------------------
 # Trailers Management
