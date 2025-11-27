@@ -4662,46 +4662,62 @@ if page == "Income":
     st.caption("Check what addresses are actually stored in the database")
 
     if st.button("Show Sample Address Data"):
-        conn = get_db_connection()
-        cur = conn.cursor()
-    
-        cur.execute("""
-            SELECT 
-                income_id,
-                truck_id,
-                pickup_city,
-                pickup_state, 
-                pickup_zip,
-                pickup_address,
-                pickup_full_address,
-                delivery_city,
-                delivery_state,
-                delivery_zip,
-                delivery_address,
-                delivery_full_address,
-                empty_miles
-            FROM income
-            WHERE pickup_date IS NOT NULL
-            ORDER BY pickup_date DESC
-            LIMIT 10
-        """)
-    
-        rows = cur.fetchall()
-        conn.close()
-    
+        from sqlalchemy import text
+
+        raw_conn = get_raw_db_connection()
+        try:
+            result = raw_conn.execute(
+                text(
+                    """
+                    SELECT 
+                        income_id,
+                        truck_id,
+                        pickup_city,
+                        pickup_state, 
+                        pickup_zip,
+                        pickup_address,
+                        pickup_full_address,
+                        delivery_city,
+                        delivery_state,
+                        delivery_zip,
+                        delivery_address,
+                        delivery_full_address,
+                        empty_miles
+                    FROM income
+                    WHERE pickup_date IS NOT NULL
+                    ORDER BY pickup_date DESC
+                    LIMIT 10
+                    """
+                )
+            )
+            rows = result.fetchall()
+        finally:
+            raw_conn.close()
+
         if rows:
-            df_diag = pd.DataFrame(rows, columns=[
-                'ID', 'Truck', 'P_City', 'P_State', 'P_Zip', 
-                'P_Address', 'P_Full_Address',
-                'D_City', 'D_State', 'D_Zip',
-                'D_Address', 'D_Full_Address',
-                'Empty_Miles'
-            ])
-            st.dataframe(df_diag, use_container_width=True)
-        
+            df_diag = pd.DataFrame(
+                rows,
+                columns=[
+                    "ID",
+                    "Truck",
+                    "P_City",
+                    "P_State",
+                    "P_Zip",
+                    "P_Address",
+                    "P_Full_Address",
+                    "D_City",
+                    "D_State",
+                    "D_Zip",
+                    "D_Address",
+                    "D_Full_Address",
+                    "Empty_Miles",
+                ],
+            )
+            st.dataframe(df_diag, width='stretch')
+
             # Check which columns have data
             st.write("**Column Status:**")
-            for col in ['P_Address', 'P_Full_Address', 'D_Address', 'D_Full_Address']:
+            for col in ["P_Address", "P_Full_Address", "D_Address", "D_Full_Address"]:
                 non_null = df_diag[col].notna().sum()
                 st.write(f"- {col}: {non_null}/10 records have data")
         else:
@@ -4711,69 +4727,82 @@ if page == "Income":
     with st.expander("🔧 Database Cleanup Tools"):
         st.caption("Run this once to fix ZIP code decimals in existing data")
         if st.button("Fix ZIP Code Decimals (.0 issue)"):
-            conn = get_db_connection()
-            cur = conn.cursor()
-            
+            from sqlalchemy import text
+
+            raw_conn = get_raw_db_connection()
             try:
-                # Remove .0 from ZIP codes
-                cur.execute("""
-                    UPDATE income 
-                    SET pickup_zip = CAST(CAST(pickup_zip AS INTEGER) AS TEXT)
-                    WHERE pickup_zip LIKE '%.0'
-                """)
-                
-                cur.execute("""
-                    UPDATE income 
-                    SET delivery_zip = CAST(CAST(delivery_zip AS INTEGER) AS TEXT)
-                    WHERE delivery_zip LIKE '%.0'
-                """)
-                
+                # Remove .0 from ZIP codes (PostgreSQL syntax)
+                raw_conn.execute(
+                    text(
+                        """
+                        UPDATE income 
+                        SET pickup_zip = CAST(CAST(pickup_zip AS INTEGER) AS TEXT)
+                        WHERE pickup_zip LIKE '%.0'
+                        """
+                    )
+                )
+
+                raw_conn.execute(
+                    text(
+                        """
+                        UPDATE income 
+                        SET delivery_zip = CAST(CAST(delivery_zip AS INTEGER) AS TEXT)
+                        WHERE delivery_zip LIKE '%.0'
+                        """
+                    )
+                )
+
                 # Rebuild pickup addresses without .0
-                cur.execute("""
-                    UPDATE income
-                    SET pickup_address = 
-                        CASE 
-                            WHEN pickup_city IS NOT NULL OR pickup_state IS NOT NULL OR pickup_zip IS NOT NULL
-                            THEN (
-                                COALESCE(pickup_city, '') || 
-                                CASE WHEN pickup_city IS NOT NULL AND pickup_state IS NOT NULL THEN ', ' ELSE '' END ||
-                                COALESCE(pickup_state, '') ||
-                                CASE WHEN (pickup_city IS NOT NULL OR pickup_state IS NOT NULL) AND pickup_zip IS NOT NULL THEN ' ' ELSE '' END ||
-                                COALESCE(pickup_zip, '')
-                            )
-                            ELSE pickup_address
-                        END
-                    WHERE pickup_address LIKE '%.0'
-                """)
-                
+                raw_conn.execute(
+                    text(
+                        """
+                        UPDATE income
+                        SET pickup_address = 
+                            CASE 
+                                WHEN pickup_city IS NOT NULL OR pickup_state IS NOT NULL OR pickup_zip IS NOT NULL
+                                THEN (
+                                    COALESCE(pickup_city, '') || 
+                                    CASE WHEN pickup_city IS NOT NULL AND pickup_state IS NOT NULL THEN ', ' ELSE '' END ||
+                                    COALESCE(pickup_state, '') ||
+                                    CASE WHEN (pickup_city IS NOT NULL OR pickup_state IS NOT NULL) AND pickup_zip IS NOT NULL THEN ' ' ELSE '' END ||
+                                    COALESCE(pickup_zip, '')
+                                )
+                                ELSE pickup_address
+                            END
+                        WHERE pickup_address LIKE '%.0'
+                        """
+                    )
+                )
+
                 # Rebuild delivery addresses without .0
-                cur.execute("""
-                    UPDATE income
-                    SET delivery_address = 
-                        CASE 
-                            WHEN delivery_city IS NOT NULL OR delivery_state IS NOT NULL OR delivery_zip IS NOT NULL
-                            THEN (
-                                COALESCE(delivery_city, '') || 
-                                CASE WHEN delivery_city IS NOT NULL AND delivery_state IS NOT NULL THEN ', ' ELSE '' END ||
-                                COALESCE(delivery_state, '') ||
-                                CASE WHEN (delivery_city IS NOT NULL OR delivery_state IS NOT NULL) AND delivery_zip IS NOT NULL THEN ' ' ELSE '' END ||
-                                COALESCE(delivery_zip, '')
-                            )
-                            ELSE delivery_address
-                        END
-                    WHERE delivery_address LIKE '%.0'
-                """)
-                
-                rows_affected = cur.rowcount
-                conn.commit()
-                conn.close()
-                
-                st.success(f"✅ Fixed ZIP codes! Updated {rows_affected} records.")
+                raw_conn.execute(
+                    text(
+                        """
+                        UPDATE income
+                        SET delivery_address = 
+                            CASE 
+                                WHEN delivery_city IS NOT NULL OR delivery_state IS NOT NULL OR delivery_zip IS NOT NULL
+                                THEN (
+                                    COALESCE(delivery_city, '') || 
+                                    CASE WHEN delivery_city IS NOT NULL AND delivery_state IS NOT NULL THEN ', ' ELSE '' END ||
+                                    COALESCE(delivery_state, '') ||
+                                    CASE WHEN (delivery_city IS NOT NULL OR delivery_state IS NOT NULL) AND delivery_zip IS NOT NULL THEN ' ' ELSE '' END ||
+                                    COALESCE(delivery_zip, '')
+                                )
+                                ELSE delivery_address
+                            END
+                        WHERE delivery_address LIKE '%.0'
+                        """
+                    )
+                )
+
+                raw_conn.commit()
+                st.success("✅ Fixed ZIP codes!")
                 st.info("You can now close this section - cleanup is complete.")
-                
             except Exception as e:
                 st.error(f"Error during cleanup: {e}")
-                conn.close()
+            finally:
+                raw_conn.close()
 
     with tab1:
         # -------------------------
@@ -4794,8 +4823,8 @@ if page == "Income":
             st.warning("Start date cannot be after end date. Adjusting.")
             start_date, end_date = end_date, start_date
 
-        # Fetch and filter income by date on the DB side for efficiency
-        conn = get_db_connection()
+        # Fetch and filter income by date
+        raw_conn = get_raw_db_connection()
         try:
             q = """
                 SELECT 
@@ -4827,41 +4856,41 @@ if page == "Income":
                     i.stops
                 FROM income i
                 LEFT JOIN trucks t ON i.truck_id = t.truck_id
-                WHERE DATE(i.date) BETWEEN DATE(?) AND DATE(?)
-                ORDER BY DATE(i.date) DESC, i.delivery_time DESC, i.income_id DESC
+                WHERE i.date BETWEEN %s AND %s
+                ORDER BY i.date DESC, i.delivery_time DESC, i.income_id DESC
             """
-            income_df = pd.read_sql_query(q, conn, params=(start_date.isoformat(), end_date.isoformat()))
+            income_df = pd.read_sql_query(q, raw_conn, params=(start_date, end_date))
         except Exception as e:
             st.error(f"Failed to load income: {e}")
             income_df = pd.DataFrame()
         finally:
-            conn.close()
+            raw_conn.close()
 
         if income_df is None or income_df.empty:
             st.info("No income records in selected range.")
         else:
             # Show Load number instead of Description, and Truck Number instead of truck_id
             view_df = income_df.copy()
-        
+
             # Rename columns for display
             if "description" in view_df.columns:
                 view_df.rename(columns={"description": "Load number"}, inplace=True)
-        
+
             # Drop truck_id and keep only truck_number for display
-            display_columns = [col for col in view_df.columns if col != 'truck_id']
+            display_columns = [col for col in view_df.columns if col != "truck_id"]
             view_df = view_df[display_columns]
-        
+
             # Rename truck_number to Truck for cleaner display
             if "truck_number" in view_df.columns:
                 view_df.rename(columns={"truck_number": "Truck"}, inplace=True)
-        
+
             # Reorder columns to put Truck near the front
             cols = view_df.columns.tolist()
-            if 'Truck' in cols:
+            if "Truck" in cols:
                 # Move Truck to position after date
-                cols.remove('Truck')
-                date_idx = cols.index('date') if 'date' in cols else 0
-                cols.insert(date_idx + 1, 'Truck')
+                cols.remove("Truck")
+                date_idx = cols.index("date") if "date" in cols else 0
+                cols.insert(date_idx + 1, "Truck")
                 view_df = view_df[cols]
 
             # Pagination state
@@ -4876,7 +4905,7 @@ if page == "Income":
 
             st.caption(f"Showing {start_idx + 1}-{end_idx} of {total_rows} loads")
 
-            st.dataframe(view_df.iloc[start_idx:end_idx], use_container_width=True)
+            st.dataframe(view_df.iloc[start_idx:end_idx], width='stretch')
 
             col_prev, col_pnum, col_next = st.columns([1, 2, 1])
             with col_prev:
@@ -4893,12 +4922,12 @@ if page == "Income":
             # Export buttons
             st.subheader("Export")
             col_exp_csv, col_exp_xlsx = st.columns(2)
-            csv_bytes = view_df.to_csv(index=False).encode('utf-8')
+            csv_bytes = view_df.to_csv(index=False).encode("utf-8")
             col_exp_csv.download_button(
                 "Export Income to CSV",
                 data=csv_bytes,
                 file_name=f"income_{start_date}_{end_date}.csv",
-                mime="text/csv"
+                mime="text/csv",
             )
 
             excel_buffer = io.BytesIO()
@@ -4906,7 +4935,7 @@ if page == "Income":
             for engine in ("xlsxwriter", "openpyxl"):
                 try:
                     with pd.ExcelWriter(excel_buffer, engine=engine) as writer:
-                        view_df.to_excel(writer, index=False, sheet_name='Income')
+                        view_df.to_excel(writer, index=False, sheet_name="Income")
                     excel_data = excel_buffer.getvalue()
                     break
                 except Exception:
@@ -4917,145 +4946,182 @@ if page == "Income":
                     "Export Income to Excel",
                     data=excel_data,
                     file_name=f"income_{start_date}_{end_date}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
             else:
-                col_exp_xlsx.error("Install xlsxwriter or openpyxl for Excel export:\n`pip install xlsxwriter openpyxl`")
-
+                col_exp_xlsx.error(
+                    "Install xlsxwriter or openpyxl for Excel export:\n`pip install xlsxwriter openpyxl`"
+                )
+                
             # Bulk Empty Miles Calculator
             st.subheader("🗺️ Bulk Calculate Empty Miles")
             st.caption("Calculate empty miles for non-TONU loads using OpenRouteService API")
 
             if st.button("Calculate Empty Miles for All Loads (Rate Limited)"):
-                conn_bulk = get_db_connection()
-                cur_bulk = conn_bulk.cursor()
-    
-                # Get all non-TONU loads that need empty miles calculated
-                # Use COALESCE to check both address columns
-                cur_bulk.execute("""
-                    SELECT income_id, truck_id, 
-                           pickup_date, pickup_time, 
-                           COALESCE(pickup_full_address, pickup_address) as pickup_addr,
-                           delivery_date, delivery_time,
-                           COALESCE(delivery_full_address, delivery_address) as delivery_addr,
-                           tonu
-                    FROM income
-                    WHERE DATE(date) BETWEEN DATE(?) AND DATE(?)
-                      AND (tonu IS NULL OR tonu = 'N' OR tonu = '')
-                      AND COALESCE(pickup_full_address, pickup_address) IS NOT NULL
-                      AND COALESCE(pickup_full_address, pickup_address) != ''
-                      AND (empty_miles IS NULL OR empty_miles = 0 OR empty_miles < 0.5)
-                    ORDER BY truck_id, 
-                             COALESCE(delivery_date, pickup_date) ASC, 
-                             CASE WHEN delivery_time IS NULL THEN '23:59:59' ELSE delivery_time END ASC
-                """, (start_date.isoformat(), end_date.isoformat()))
-    
-                loads_to_calc = cur_bulk.fetchall()
-                conn_bulk.close()
-    
+                from sqlalchemy import text
+
+                raw_conn = get_raw_db_connection()
+                try:
+                    # Get all non-TONU loads that need empty miles calculated
+                    result = raw_conn.execute(
+                        text(
+                            """
+                            SELECT income_id, truck_id, 
+                                   pickup_date, pickup_time, 
+                                   COALESCE(pickup_full_address, pickup_address) as pickup_addr,
+                                   delivery_date, delivery_time,
+                                   COALESCE(delivery_full_address, delivery_address) as delivery_addr,
+                                   tonu
+                            FROM income
+                            WHERE date BETWEEN :start_date AND :end_date
+                              AND (tonu IS NULL OR tonu = 'N' OR tonu = '')
+                              AND COALESCE(pickup_full_address, pickup_address) IS NOT NULL
+                              AND COALESCE(pickup_full_address, pickup_address) != ''
+                              AND (empty_miles IS NULL OR empty_miles = 0 OR empty_miles < 0.5)
+                            ORDER BY truck_id, 
+                                     COALESCE(delivery_date, pickup_date) ASC, 
+                                     COALESCE(delivery_time, '23:59:59') ASC
+                            """
+                        ),
+                        {"start_date": start_date, "end_date": end_date},
+                    )
+                    loads_to_calc = result.fetchall()
+                finally:
+                    raw_conn.close()
+
                 if not loads_to_calc:
                     st.info("No non-TONU loads need empty miles calculation in this date range.")
                 else:
                     st.info(f"Found {len(loads_to_calc)} non-TONU loads to calculate. This may take a few minutes...")
                     st.caption("⏱️ Processing with 2-second delays to respect API rate limits (40/min)")
-        
+
                     progress_bar = st.progress(0)
                     status_text = st.empty()
-        
+
                     success_count = 0
                     error_count = 0
                     skipped_count = 0
-        
+
+                    from sqlalchemy import text as sql_text
+
                     for idx, load in enumerate(loads_to_calc):
-                        (income_id, truck_id, 
-                         pickup_date, pickup_time, current_pickup_addr,
-                         delivery_date, delivery_time, current_delivery_addr,
-                         tonu) = load
-            
+                        (
+                            income_id,
+                            truck_id,
+                            pickup_date,
+                            pickup_time,
+                            current_pickup_addr,
+                            delivery_date,
+                            delivery_time,
+                            current_delivery_addr,
+                            tonu,
+                        ) = load
+
                         if not current_pickup_addr or len(current_pickup_addr.strip()) < 5:
                             skipped_count += 1
+                            progress_bar.progress((idx + 1) / len(loads_to_calc))
                             continue
-            
+
                         # Find previous load's delivery for this truck
-                        conn_prev = get_db_connection()
-                        cur_prev = conn_prev.cursor()
-            
-                        # Use delivery time to find chronologically previous load
-                        if delivery_date and delivery_time:
-                            cur_prev.execute("""
-                                SELECT COALESCE(delivery_full_address, delivery_address) as prev_delivery
-                                FROM income
-                                WHERE truck_id = ? 
-                                  AND (tonu IS NULL OR tonu = 'N' OR tonu = '')
-                                  AND COALESCE(delivery_full_address, delivery_address) IS NOT NULL
-                                  AND COALESCE(delivery_full_address, delivery_address) != ''
-                                  AND (
-                                      COALESCE(delivery_date, pickup_date) < ? 
-                                      OR (COALESCE(delivery_date, pickup_date) = ? AND COALESCE(delivery_time, '00:00:00') < ?)
-                                  )
-                                ORDER BY COALESCE(delivery_date, pickup_date) DESC, 
-                                         CASE WHEN delivery_time IS NULL THEN '00:00:00' ELSE delivery_time END DESC
-                                LIMIT 1
-                            """, (truck_id, delivery_date, delivery_date, delivery_time))
-                        elif pickup_date:
-                            # Fallback: use pickup date if delivery date is missing
-                            cur_prev.execute("""
-                                SELECT COALESCE(delivery_full_address, delivery_address) as prev_delivery
-                                FROM income
-                                WHERE truck_id = ? 
-                                  AND (tonu IS NULL OR tonu = 'N' OR tonu = '')
-                                  AND COALESCE(delivery_full_address, delivery_address) IS NOT NULL
-                                  AND COALESCE(delivery_full_address, delivery_address) != ''
-                                  AND COALESCE(delivery_date, pickup_date) < ?
-                                ORDER BY COALESCE(delivery_date, pickup_date) DESC, 
-                                         CASE WHEN delivery_time IS NULL THEN '00:00:00' ELSE delivery_time END DESC
-                                LIMIT 1
-                            """, (truck_id, pickup_date))
-                        else:
-                            # No date info, skip
-                            conn_prev.close()
-                            skipped_count += 1
-                            continue
-            
-                        prev_load = cur_prev.fetchone()
-                        conn_prev.close()
-            
+                        raw_prev = get_raw_db_connection()
+                        try:
+                            if delivery_date and delivery_time:
+                                prev_result = raw_prev.execute(
+                                    sql_text(
+                                        """
+                                        SELECT COALESCE(delivery_full_address, delivery_address) AS prev_delivery
+                                        FROM income
+                                        WHERE truck_id = :truck_id 
+                                          AND (tonu IS NULL OR tonu = 'N' OR tonu = '')
+                                          AND COALESCE(delivery_full_address, delivery_address) IS NOT NULL
+                                          AND COALESCE(delivery_full_address, delivery_address) != ''
+                                          AND (
+                                              COALESCE(delivery_date, pickup_date) < :d_date
+                                              OR (COALESCE(delivery_date, pickup_date) = :d_date 
+                                                  AND COALESCE(delivery_time, '00:00:00') < :d_time)
+                                          )
+                                        ORDER BY COALESCE(delivery_date, pickup_date) DESC, 
+                                                 COALESCE(delivery_time, '00:00:00') DESC
+                                        LIMIT 1
+                                        """
+                                    ),
+                                    {
+                                        "truck_id": truck_id,
+                                        "d_date": delivery_date,
+                                        "d_time": str(delivery_time),
+                                    },
+                                )
+                            elif pickup_date:
+                                prev_result = raw_prev.execute(
+                                    sql_text(
+                                        """
+                                        SELECT COALESCE(delivery_full_address, delivery_address) AS prev_delivery
+                                        FROM income
+                                        WHERE truck_id = :truck_id 
+                                          AND (tonu IS NULL OR tonu = 'N' OR tonu = '')
+                                          AND COALESCE(delivery_full_address, delivery_address) IS NOT NULL
+                                          AND COALESCE(delivery_full_address, delivery_address) != ''
+                                          AND COALESCE(delivery_date, pickup_date) < :p_date
+                                        ORDER BY COALESCE(delivery_date, pickup_date) DESC, 
+                                                 COALESCE(delivery_time, '00:00:00') DESC
+                                        LIMIT 1
+                                        """
+                                    ),
+                                    {"truck_id": truck_id, "p_date": pickup_date},
+                                )
+                            else:
+                                prev_result = None
+
+                            prev_load = prev_result.fetchone() if prev_result is not None else None
+                        finally:
+                            raw_prev.close()
+
                         if prev_load and prev_load[0]:
                             prev_delivery = prev_load[0]
-                
-                            status_text.text(f"Processing load {idx+1}/{len(loads_to_calc)}... ({success_count} ✓, {error_count} ✗, {skipped_count} skipped)")
-                
+
+                            status_text.text(
+                                f"Processing load {idx+1}/{len(loads_to_calc)}... "
+                                f"({success_count} ✓, {error_count} ✗, {skipped_count} skipped)"
+                            )
+
                             calculated_miles = calculate_distance_miles(prev_delivery, current_pickup_addr)
-                
+
                             if calculated_miles > 0:
-                                conn_update = get_db_connection()
-                                cur_update = conn_update.cursor()
-                                cur_update.execute("""
-                                    UPDATE income SET empty_miles = ? WHERE income_id = ?
-                                """, (calculated_miles, income_id))
-                                conn_update.commit()
-                                conn_update.close()
-                                success_count += 1
+                                raw_update = get_raw_db_connection()
+                                try:
+                                    raw_update.execute(
+                                        sql_text(
+                                            "UPDATE income SET empty_miles = :m WHERE income_id = :iid"
+                                        ),
+                                        {"m": calculated_miles, "iid": income_id},
+                                    )
+                                    raw_update.commit()
+                                    success_count += 1
+                                except Exception:
+                                    error_count += 1
+                                finally:
+                                    raw_update.close()
                             else:
                                 error_count += 1
-                
-                            # 2-second delay between API calls to stay under 40/min limit
+
                             time.sleep(2)
                         else:
-                            # No previous load found (first load for this truck in date range)
+                            # No previous load found (first load)
                             skipped_count += 1
-            
+
                         progress_bar.progress((idx + 1) / len(loads_to_calc))
-        
+
                     progress_bar.empty()
                     status_text.empty()
-        
+
                     st.success(f"✅ Calculated empty miles for {success_count} loads")
                     if error_count > 0:
                         st.warning(f"⚠️ {error_count} loads failed (check addresses)")
                     if skipped_count > 0:
-                        st.info(f"ℹ️ {skipped_count} loads skipped (no previous load or missing address)")
-        
+                        st.info(
+                            f"ℹ️ {skipped_count} loads skipped (no previous load or missing address)"
+                        )
+
                     safe_rerun()
 
             st.divider()
@@ -5063,40 +5129,54 @@ if page == "Income":
             st.caption("See exactly what addresses are being compared and why the result is wrong")
 
             # Let user pick a load to debug
-            conn_debug = get_db_connection()
-            cur_debug = conn_debug.cursor()
+            from sqlalchemy import text as sql_text
 
-            cur_debug.execute("""
-                SELECT income_id, truck_id, description,
-                       pickup_date, pickup_time,
-                       COALESCE(pickup_full_address, pickup_address) as pickup_addr,
-                       delivery_date, delivery_time,
-                       COALESCE(delivery_full_address, delivery_address) as delivery_addr,
-                       empty_miles
-                FROM income
-                WHERE DATE(date) BETWEEN DATE(?) AND DATE(?)
-                ORDER BY truck_id, pickup_date, pickup_time
-            """, (start_date.isoformat(), end_date.isoformat()))
-
-            all_loads = cur_debug.fetchall()
-            conn_debug.close()
+            raw_debug = get_raw_db_connection()
+            try:
+                debug_result = raw_debug.execute(
+                    sql_text(
+                        """
+                        SELECT income_id, truck_id, description,
+                               pickup_date, pickup_time,
+                               COALESCE(pickup_full_address, pickup_address) AS pickup_addr,
+                               delivery_date, delivery_time,
+                               COALESCE(delivery_full_address, delivery_address) AS delivery_addr,
+                               empty_miles
+                        FROM income
+                        WHERE date BETWEEN :start_date AND :end_date
+                        ORDER BY truck_id, pickup_date, pickup_time
+                        """
+                    ),
+                    {"start_date": start_date, "end_date": end_date},
+                )
+                all_loads = debug_result.fetchall()
+            finally:
+                raw_debug.close()
 
             if all_loads:
                 load_options = [
                     f"ID {row[0]} | Truck {row[1]} | {row[2]} | Empty: {row[9] if row[9] else 'None'}"
                     for row in all_loads
                 ]
-    
+
                 selected_debug = st.selectbox("Select load to debug:", load_options)
                 selected_idx = load_options.index(selected_debug)
                 selected_load = all_loads[selected_idx]
-    
+
                 if st.button("🔍 Debug This Load"):
-                    (income_id, truck_id, description,
-                     pickup_date, pickup_time, current_pickup_addr,
-                     delivery_date, delivery_time, current_delivery_addr,
-                     current_empty_miles) = selected_load
-        
+                    (
+                        income_id,
+                        truck_id,
+                        description,
+                        pickup_date,
+                        pickup_time,
+                        current_pickup_addr,
+                        delivery_date,
+                        delivery_time,
+                        current_delivery_addr,
+                        current_empty_miles,
+                    ) = selected_load
+
                     st.write("---")
                     st.write(f"**Current Load:** ID {income_id}, Truck {truck_id}")
                     st.write(f"**Load Number:** {description}")
@@ -5105,106 +5185,137 @@ if page == "Income":
                     st.write(f"**Delivery:** {delivery_date} {delivery_time or '(no time)'}")
                     st.write(f"**Delivery Address:** `{current_delivery_addr}`")
                     st.write(f"**Current Empty Miles:** {current_empty_miles}")
-        
+
                     st.write("---")
                     st.write("**Finding Previous Load...**")
-        
-                    # Find previous load using same logic as bulk calculator
-                    conn_prev = get_db_connection()
-                    cur_prev = conn_prev.cursor()
-        
-                    if delivery_date and delivery_time:
-                        cur_prev.execute("""
-                            SELECT income_id, description,
-                                   pickup_date, pickup_time,
-                                   COALESCE(pickup_full_address, pickup_address) as prev_pickup,
-                                   delivery_date, delivery_time,
-                                   COALESCE(delivery_full_address, delivery_address) as prev_delivery
-                            FROM income
-                            WHERE truck_id = ? 
-                              AND (tonu IS NULL OR tonu = 'N' OR tonu = '')
-                              AND COALESCE(delivery_full_address, delivery_address) IS NOT NULL
-                              AND COALESCE(delivery_full_address, delivery_address) != ''
-                              AND (
-                                  COALESCE(delivery_date, pickup_date) < ? 
-                                  OR (COALESCE(delivery_date, pickup_date) = ? AND COALESCE(delivery_time, '00:00:00') < ?)
-                              )
-                            ORDER BY COALESCE(delivery_date, pickup_date) DESC, 
-                                     CASE WHEN delivery_time IS NULL THEN '00:00:00' ELSE delivery_time END DESC
-                            LIMIT 1
-                        """, (truck_id, delivery_date, delivery_date, delivery_time))
-                    elif pickup_date:
-                        cur_prev.execute("""
-                            SELECT income_id, description,
-                                   pickup_date, pickup_time,
-                                   COALESCE(pickup_full_address, pickup_address) as prev_pickup,
-                                   delivery_date, delivery_time,
-                                   COALESCE(delivery_full_address, delivery_address) as prev_delivery
-                            FROM income
-                            WHERE truck_id = ? 
-                              AND (tonu IS NULL OR tonu = 'N' OR tonu = '')
-                              AND COALESCE(delivery_full_address, delivery_address) IS NOT NULL
-                              AND COALESCE(delivery_full_address, delivery_address) != ''
-                              AND COALESCE(delivery_date, pickup_date) < ?
-                            ORDER BY COALESCE(delivery_date, pickup_date) DESC, 
-                                     CASE WHEN delivery_time IS NULL THEN '00:00:00' ELSE delivery_time END DESC
-                            LIMIT 1
-                        """, (truck_id, pickup_date))
-                    else:
-                        st.error("❌ No date info for this load!")
-                        conn_prev.close()
-                        st.stop()
-        
-                    prev_load = cur_prev.fetchone()
-                    conn_prev.close()
-        
+
+                    raw_prev = get_raw_db_connection()
+                    try:
+                        if delivery_date and delivery_time:
+                            prev_res = raw_prev.execute(
+                                sql_text(
+                                    """
+                                    SELECT income_id, description,
+                                           pickup_date, pickup_time,
+                                           COALESCE(pickup_full_address, pickup_address) AS prev_pickup,
+                                           delivery_date, delivery_time,
+                                           COALESCE(delivery_full_address, delivery_address) AS prev_delivery
+                                    FROM income
+                                    WHERE truck_id = :truck_id 
+                                      AND (tonu IS NULL OR tonu = 'N' OR tonu = '')
+                                      AND COALESCE(delivery_full_address, delivery_address) IS NOT NULL
+                                      AND COALESCE(delivery_full_address, delivery_address) != ''
+                                      AND (
+                                          COALESCE(delivery_date, pickup_date) < :d_date
+                                          OR (COALESCE(delivery_date, pickup_date) = :d_date 
+                                              AND COALESCE(delivery_time, '00:00:00') < :d_time)
+                                      )
+                                    ORDER BY COALESCE(delivery_date, pickup_date) DESC, 
+                                             COALESCE(delivery_time, '00:00:00') DESC
+                                    LIMIT 1
+                                    """
+                                ),
+                                {
+                                    "truck_id": truck_id,
+                                    "d_date": delivery_date,
+                                    "d_time": str(delivery_time),
+                                },
+                            )
+                        elif pickup_date:
+                            prev_res = raw_prev.execute(
+                                sql_text(
+                                    """
+                                    SELECT income_id, description,
+                                           pickup_date, pickup_time,
+                                           COALESCE(pickup_full_address, pickup_address) AS prev_pickup,
+                                           delivery_date, delivery_time,
+                                           COALESCE(delivery_full_address, delivery_address) AS prev_delivery
+                                    FROM income
+                                    WHERE truck_id = :truck_id 
+                                      AND (tonu IS NULL OR tonu = 'N' OR tonu = '')
+                                      AND COALESCE(delivery_full_address, delivery_address) IS NOT NULL
+                                      AND COALESCE(delivery_full_address, delivery_address) != ''
+                                      AND COALESCE(delivery_date, pickup_date) < :p_date
+                                    ORDER BY COALESCE(delivery_date, pickup_date) DESC, 
+                                             COALESCE(delivery_time, '00:00:00') DESC
+                                    LIMIT 1
+                                    """
+                                ),
+                                {"truck_id": truck_id, "p_date": pickup_date},
+                            )
+                        else:
+                            prev_res = None
+
+                        prev_load = prev_res.fetchone() if prev_res is not None else None
+                    finally:
+                        raw_prev.close()
+
                     if prev_load:
-                        (prev_id, prev_desc, prev_pickup_date, prev_pickup_time,
-                         prev_pickup_addr, prev_delivery_date, prev_delivery_time, prev_delivery_addr) = prev_load
-            
+                        (
+                            prev_id,
+                            prev_desc,
+                            prev_pickup_date,
+                            prev_pickup_time,
+                            prev_pickup_addr,
+                            prev_delivery_date,
+                            prev_delivery_time,
+                            prev_delivery_addr,
+                        ) = prev_load
+
                         st.write(f"**Previous Load:** ID {prev_id}, Truck {truck_id}")
                         st.write(f"**Load Number:** {prev_desc}")
                         st.write(f"**Pickup:** {prev_pickup_date} {prev_pickup_time or '(no time)'}")
                         st.write(f"**Pickup Address:** `{prev_pickup_addr}`")
                         st.write(f"**Delivery:** {prev_delivery_date} {prev_delivery_time or '(no time)'}")
                         st.write(f"**Delivery Address:** `{prev_delivery_addr}`")
-            
+
                         st.write("---")
                         st.write("**Calculating Empty Miles:**")
                         st.info(f"From: **{prev_delivery_addr}**\n\nTo: **{current_pickup_addr}**")
-            
-                        calculated = calculate_distance_miles(prev_delivery_addr, current_pickup_addr, debug=True)
-            
+
+                        calculated = calculate_distance_miles(
+                            prev_delivery_addr, current_pickup_addr, debug=True
+                        )
+
                         st.write("---")
                         if calculated > 0:
                             st.success(f"✅ **Calculated: {calculated} miles**")
                             if current_empty_miles and abs(current_empty_miles - calculated) > 1:
-                                st.warning(f"⚠️ Database has {current_empty_miles} miles (difference: {abs(current_empty_miles - calculated):.2f})")
+                                st.warning(
+                                    f"⚠️ Database has {current_empty_miles} miles "
+                                    f"(difference: {abs(current_empty_miles - calculated):.2f})"
+                                )
                         else:
                             st.error("❌ Calculation failed!")
                     else:
                         st.warning("⚠️ No previous load found for this truck before this date/time")
-                        st.info("This is likely the first load for this truck in your date range, so empty miles = 0 is correct")
+                        st.info(
+                            "This is likely the first load for this truck in your date range, "
+                            "so empty miles = 0 is correct"
+                        )
 
+            # -------------------------
+            # Edit or Delete Income
+            # -------------------------
             st.subheader("Edit or Delete Income")
-            # Include Load number in the selectbox display
+
             def fmt_income_option(xid: int):
-                row = income_df[income_df['income_id'] == xid].iloc[0]
-                load_num = row['description'] or ""
+                row = income_df[income_df["income_id"] == xid].iloc[0]
+                load_num = row["description"] or ""
                 try:
-                    amt = float(row['amount'] or 0.0)
+                    amt = float(row["amount"] or 0.0)
                 except Exception:
                     amt = 0.0
                 return f"{row['date']} - ${amt:,.2f}" + (f" - Load {load_num}" if load_num else "")
 
             selected_income = st.selectbox(
                 "Select Income",
-                options=income_df['income_id'].tolist(),
-                format_func=fmt_income_option
+                options=income_df["income_id"].tolist(),
+                format_func=fmt_income_option,
             )
 
             if selected_income:
-                income_data = income_df[income_df['income_id'] == selected_income].iloc[0]
+                income_data = income_df[income_df["income_id"] == selected_income].iloc[0]
                 col1, col2 = st.columns(2)
                 with col1:
                     if st.button("✏️ Edit Income", key=f"edit_income_{selected_income}"):
@@ -5215,111 +5326,148 @@ if page == "Income":
                         st.success("Income deleted!")
                         safe_rerun()
 
-                if st.session_state.get('editing_income') == selected_income:
+                if st.session_state.get("editing_income") == selected_income:
+                    from sqlalchemy import text as sql_text
+
                     with st.form("edit_income_form"):
                         # Edit form
                         new_date = st.date_input(
                             "Date",
-                            value=to_date(income_data['date'])
+                            value=to_date(income_data["date"]),
                         )
-                        new_source = st.text_input("Source", value=income_data['source'] or "")
-                        new_amount = st.number_input("Amount", value=float(income_data['amount']), min_value=0.0)
+                        new_source = st.text_input(
+                            "Source", value=income_data["source"] or ""
+                        )
+                        new_amount = st.number_input(
+                            "Amount",
+                            value=float(income_data["amount"]),
+                            min_value=0.0,
+                        )
 
                         # truck selection
                         trucks_df = get_trucks()
-                        truck_options = [f"{r['number']} - {r['make'] or ''} {r['model'] or ''}".strip()
-                                         for _, r in trucks_df.iterrows()]
-                        truck_ids = trucks_df['truck_id'].tolist()
+                        truck_options = [
+                            f"{r['number']} - {r['make'] or ''} {r['model'] or ''}".strip()
+                            for _, r in trucks_df.iterrows()
+                        ]
+                        truck_ids = trucks_df["truck_id"].tolist()
                         current_truck_idx = 0
-                        if income_data['truck_id']:
+                        if income_data["truck_id"]:
                             try:
-                                current_truck_idx = truck_ids.index(income_data['truck_id'])
+                                current_truck_idx = truck_ids.index(income_data["truck_id"])
                             except ValueError:
                                 current_truck_idx = 0
                         selected_truck_idx = st.selectbox(
                             "Truck",
                             range(len(truck_options)),
                             format_func=lambda x: truck_options[x],
-                            index=current_truck_idx
+                            index=current_truck_idx,
                         )
                         new_truck_id = truck_ids[selected_truck_idx]
 
                         # Load number
-                        new_load_number = st.text_input("Load number", value=income_data['description'] or "")
+                        new_load_number = st.text_input(
+                            "Load number", value=income_data["description"] or ""
+                        )
 
                         # Pickup/Delivery section
                         st.markdown("---")
                         st.subheader("📍 Pickup & Delivery")
-                        
+
                         col_p1, col_p2 = st.columns(2)
                         with col_p1:
                             new_pickup_date = st.date_input(
                                 "Pickup Date",
-                                value=to_date(income_data['pickup_date']) if income_data['pickup_date'] else None
+                                value=to_date(income_data["pickup_date"])
+                                if income_data["pickup_date"]
+                                else None,
                             )
                         with col_p2:
                             new_pickup_time = st.time_input(
                                 "Pickup Time",
-                                value=datetime.strptime(income_data['pickup_time'], "%H:%M:%S").time() if income_data['pickup_time'] else None
+                                value=datetime.strptime(
+                                    income_data["pickup_time"], "%H:%M:%S"
+                                ).time()
+                                if income_data["pickup_time"]
+                                else time(0, 0),
                             )
-                        
+
                         new_pickup_address = st.text_input(
                             "Pickup Address",
-                            value=income_data['pickup_address'] or ""
+                            value=income_data["pickup_address"] or "",
                         )
-                        
+
                         col_d1, col_d2 = st.columns(2)
                         with col_d1:
                             new_delivery_date = st.date_input(
                                 "Delivery Date",
-                                value=to_date(income_data['delivery_date']) if income_data['delivery_date'] else None
+                                value=to_date(income_data["delivery_date"])
+                                if income_data["delivery_date"]
+                                else None,
                             )
                         with col_d2:
                             new_delivery_time = st.time_input(
                                 "Delivery Time",
-                                value=datetime.strptime(income_data['delivery_time'], "%H:%M:%S").time() if income_data['delivery_time'] else None
+                                value=datetime.strptime(
+                                    income_data["delivery_time"], "%H:%M:%S"
+                                ).time()
+                                if income_data["delivery_time"]
+                                else time(0, 0),
                             )
-                        
+
                         new_delivery_address = st.text_input(
                             "Delivery Address",
-                            value=income_data['delivery_address'] or ""
+                            value=income_data["delivery_address"] or "",
                         )
 
                         # Mileage fields
                         st.markdown("---")
                         st.subheader("📏 Mileage & Rate")
-                        
+
                         new_rpm = st.number_input(
                             "Rate Per Mile (RPM)",
-                            value=float(income_data['rpm']) if income_data['rpm'] else 0.0,
+                            value=float(income_data["rpm"]) if income_data["rpm"] else 0.0,
                             min_value=0.0,
                             step=0.01,
-                            help="Revenue per mile"
+                            help="Revenue per mile",
                         )
-                        
+
                         col_em1, col_em2 = st.columns([3, 1])
                         with col_em1:
                             new_empty_miles = st.number_input(
                                 "Empty Miles",
-                                value=float(income_data['empty_miles']) if income_data['empty_miles'] else 0.0,
+                                value=float(income_data["empty_miles"])
+                                if income_data["empty_miles"]
+                                else 0.0,
                                 min_value=0.0,
-                                help="Miles driven empty (deadhead)"
+                                help="Miles driven empty (deadhead)",
                             )
                         with col_em2:
                             st.write("")
                             st.write("")
-                            calc_empty = st.form_submit_button("🗺️ Calculate", help="Calculate empty miles using API")
-                        
+                            calc_empty = st.form_submit_button(
+                                "🗺️ Calculate",
+                                help="Calculate empty miles using API",
+                            )
+
                         # Auto-calculate loaded miles if RPM is provided
                         auto_loaded = None
                         if new_rpm and new_rpm > 0:
                             auto_loaded = new_amount / new_rpm
-                        
+
                         new_loaded_miles = st.number_input(
                             "Loaded Miles",
-                            value=auto_loaded if auto_loaded else (float(income_data['loaded_miles']) if income_data['loaded_miles'] else 0.0),
+                            value=auto_loaded
+                            if auto_loaded
+                            else (
+                                float(income_data["loaded_miles"])
+                                if income_data["loaded_miles"]
+                                else 0.0
+                            ),
                             min_value=0.0,
-                            help="Miles driven loaded (auto-calculated from Amount ÷ RPM if RPM > 0)"
+                            help=(
+                                "Miles driven loaded (auto-calculated from Amount ÷ RPM if RPM > 0)"
+                            ),
                         )
 
                         col1, col2 = st.columns(2)
@@ -5327,179 +5475,263 @@ if page == "Income":
                             save_btn = st.form_submit_button("💾 Save Changes")
                         with col2:
                             cancel_btn = st.form_submit_button("❌ Cancel")
-                        
+
                         if calc_empty:
-                            # Calculate empty miles using API
-                            conn_calc = get_db_connection()
-                            cur_calc = conn_calc.cursor()
-                            
-                            # Find previous load using pickup datetime
-                            if income_data['pickup_date'] and income_data['pickup_time']:
-                                cur_calc.execute("""
-                                    SELECT delivery_address
-                                    FROM income
-                                    WHERE truck_id = ? 
-                                      AND delivery_address IS NOT NULL
-                                      AND (
-                                          pickup_date < ? 
-                                          OR (pickup_date = ? AND pickup_time < ?)
-                                      )
-                                    ORDER BY pickup_date DESC, 
-                                             CASE WHEN pickup_time IS NULL THEN '00:00:00' ELSE pickup_time END DESC
-                                    LIMIT 1
-                                """, (income_data['truck_id'], income_data['pickup_date'], income_data['pickup_date'], income_data['pickup_time']))
-                            else:
-                                cur_calc.execute("""
-                                    SELECT delivery_address
-                                    FROM income
-                                    WHERE truck_id = ? 
-                                      AND delivery_address IS NOT NULL
-                                      AND date < ?
-                                    ORDER BY date DESC
-                                    LIMIT 1
-                                """, (income_data['truck_id'], income_data['date']))
-                            
-                            prev_load = cur_calc.fetchone()
-                            conn_calc.close()
-                            
-                            if prev_load and prev_load[0] and income_data['pickup_address']:
-                                with st.spinner(f"Calculating distance..."):
-                                    calculated_miles = calculate_distance_miles(prev_load[0], income_data['pickup_address'])
+                            # Calculate empty miles using API for this record
+                            raw_calc = get_raw_db_connection()
+                            try:
+                                if income_data["pickup_date"] and income_data["pickup_time"]:
+                                    prev_res = raw_calc.execute(
+                                        sql_text(
+                                            """
+                                            SELECT delivery_address
+                                            FROM income
+                                            WHERE truck_id = :truck_id 
+                                              AND delivery_address IS NOT NULL
+                                              AND (
+                                                  pickup_date < :p_date
+                                                  OR (pickup_date = :p_date AND pickup_time < :p_time)
+                                              )
+                                            ORDER BY pickup_date DESC, 
+                                                     COALESCE(pickup_time, '00:00:00') DESC
+                                            LIMIT 1
+                                            """
+                                        ),
+                                        {
+                                            "truck_id": income_data["truck_id"],
+                                            "p_date": income_data["pickup_date"],
+                                            "p_time": str(income_data["pickup_time"]),
+                                        },
+                                    )
+                                else:
+                                    prev_res = raw_calc.execute(
+                                        sql_text(
+                                            """
+                                            SELECT delivery_address
+                                            FROM income
+                                            WHERE truck_id = :truck_id 
+                                              AND delivery_address IS NOT NULL
+                                              AND date < :d
+                                            ORDER BY date DESC
+                                            LIMIT 1
+                                            """
+                                        ),
+                                        {
+                                            "truck_id": income_data["truck_id"],
+                                            "d": income_data["date"],
+                                        },
+                                    )
+
+                                prev_load = prev_res.fetchone()
+                            finally:
+                                raw_calc.close()
+
+                            if prev_load and prev_load[0] and income_data["pickup_address"]:
+                                with st.spinner("Calculating distance..."):
+                                    calculated_miles = calculate_distance_miles(
+                                        prev_load[0], income_data["pickup_address"]
+                                    )
                                     if calculated_miles > 0:
                                         st.success(f"✅ Calculated: {calculated_miles} miles")
                                         new_empty_miles = calculated_miles
                                     else:
                                         st.error("Could not calculate distance. Check addresses.")
                             else:
-                                st.warning("Missing previous delivery address or current pickup address.")
-                        
+                                st.warning(
+                                    "Missing previous delivery address or current pickup address."
+                                )
+
                         if save_btn:
-                            conn = get_db_connection()
-                            cur = conn.cursor()
-                            cur.execute(
-                                """
-                                UPDATE income
-                                SET date=?, source=?, amount=?, truck_id=?, description=?,
-                                    rpm=?, empty_miles=?, loaded_miles=?,
-                                    pickup_date=?, pickup_time=?, pickup_address=?,
-                                    delivery_date=?, delivery_time=?, delivery_address=?
-                                WHERE income_id=?
-                                """,
-                                (new_date, new_source, new_amount, new_truck_id, new_load_number,
-                                 new_rpm, new_empty_miles, new_loaded_miles,
-                                 new_pickup_date, str(new_pickup_time) if new_pickup_time else None, new_pickup_address,
-                                 new_delivery_date, str(new_delivery_time) if new_delivery_time else None, new_delivery_address,
-                                 selected_income)
-                            )
-                            conn.commit()
-                            conn.close()
-                            st.success("Income updated!")
-                            del st.session_state.editing_income
-                            safe_rerun()
-                        
+                            raw_upd = get_raw_db_connection()
+                            try:
+                                raw_upd.execute(
+                                    sql_text(
+                                        """
+                                        UPDATE income
+                                        SET date = :date_val,
+                                            source = :source_val,
+                                            amount = :amount_val,
+                                            truck_id = :truck_id_val,
+                                            description = :desc_val,
+                                            rpm = :rpm_val,
+                                            empty_miles = :empty_miles_val,
+                                            loaded_miles = :loaded_miles_val,
+                                            pickup_date = :p_date,
+                                            pickup_time = :p_time,
+                                            pickup_address = :p_addr,
+                                            delivery_date = :d_date,
+                                            delivery_time = :d_time,
+                                            delivery_address = :d_addr
+                                        WHERE income_id = :iid
+                                        """
+                                    ),
+                                    {
+                                        "date_val": new_date,
+                                        "source_val": new_source,
+                                        "amount_val": new_amount,
+                                        "truck_id_val": new_truck_id,
+                                        "desc_val": new_load_number,
+                                        "rpm_val": new_rpm,
+                                        "empty_miles_val": new_empty_miles,
+                                        "loaded_miles_val": new_loaded_miles,
+                                        "p_date": new_pickup_date,
+                                        "p_time": str(new_pickup_time)
+                                        if new_pickup_time
+                                        else None,
+                                        "p_addr": new_pickup_address,
+                                        "d_date": new_delivery_date,
+                                        "d_time": str(new_delivery_time)
+                                        if new_delivery_time
+                                        else None,
+                                        "d_addr": new_delivery_address,
+                                        "iid": selected_income,
+                                    },
+                                )
+                                raw_upd.commit()
+                                st.success("Income updated!")
+                                del st.session_state.editing_income
+                                safe_rerun()
+                            except Exception as e:
+                                st.error(f"Error updating income: {e}")
+                            finally:
+                                raw_upd.close()
+
                         if cancel_btn:
                             del st.session_state.editing_income
                             safe_rerun()
 
+    # -------------------------
+    # Add New Income
+    # -------------------------
     with tab2:
         st.subheader("Add New Income")
         trucks_df = get_trucks()
         if not trucks_df.empty:
+            from sqlalchemy import text as sql_text
+
             with st.form("add_income"):
                 income_date = st.date_input("Date", value=date.today())
                 source = st.text_input("Source*", placeholder="e.g., Load Payment")
                 amount = st.number_input("Amount*", min_value=0.0, value=0.0)
 
-                truck_options = [f"{r['number']} - {r['make'] or ''} {r['model'] or ''}".strip()
-                                 for _, r in trucks_df.iterrows()]
-                truck_ids = trucks_df['truck_id'].tolist()
+                truck_options = [
+                    f"{r['number']} - {r['make'] or ''} {r['model'] or ''}".strip()
+                    for _, r in trucks_df.iterrows()
+                ]
+                truck_ids = trucks_df["truck_id"].tolist()
                 selected_truck_idx = st.selectbox(
                     "Truck*",
                     range(len(truck_options)),
-                    format_func=lambda x: truck_options[x]
+                    format_func=lambda x: truck_options[x],
                 )
                 truck_id = truck_ids[selected_truck_idx]
 
-                load_number = st.text_input("Load number", placeholder="e.g., 123456 or BOL #")
+                load_number = st.text_input(
+                    "Load number", placeholder="e.g., 123456 or BOL #"
+                )
 
                 # Pickup/Delivery section
                 st.markdown("---")
                 st.subheader("📍 Pickup & Delivery")
-                
+
                 col_p1, col_p2 = st.columns(2)
                 with col_p1:
                     pickup_date = st.date_input("Pickup Date")
                 with col_p2:
                     pickup_time = st.time_input("Pickup Time")
-                
+
                 pickup_address = st.text_input("Pickup Address")
-                
+
                 col_d1, col_d2 = st.columns(2)
                 with col_d1:
                     delivery_date = st.date_input("Delivery Date")
                 with col_d2:
                     delivery_time = st.time_input("Delivery Time")
-                
+
                 delivery_address = st.text_input("Delivery Address")
 
                 # Mileage fields
                 st.markdown("---")
                 st.subheader("📏 Mileage & Rate")
-                
+
                 rpm = st.number_input(
                     "Rate Per Mile (RPM)",
                     min_value=0.0,
                     value=0.0,
                     step=0.01,
-                    help="Revenue per mile"
+                    help="Revenue per mile",
                 )
-                
+
                 empty_miles = st.number_input(
                     "Empty Miles",
                     min_value=0.0,
                     value=0.0,
-                    help="Miles driven empty (deadhead)"
+                    help="Miles driven empty (deadhead)",
                 )
-                
+
                 # Auto-calculate loaded miles if RPM is provided
                 auto_loaded = None
                 if rpm and rpm > 0 and amount > 0:
                     auto_loaded = amount / rpm
-                
+
                 loaded_miles = st.number_input(
                     "Loaded Miles",
                     min_value=0.0,
                     value=auto_loaded if auto_loaded else 0.0,
-                    help="Miles driven loaded (auto-calculated from Amount ÷ RPM if RPM > 0)"
+                    help="Miles driven loaded (auto-calculated from Amount ÷ RPM if RPM > 0)",
                 )
 
-                if st.form_submit_button("Add Income"):
+                submitted = st.form_submit_button("Add Income")
+                if submitted:
                     if not source or amount <= 0:
                         st.error("Source and positive amount required.")
                     else:
-                        conn = get_db_connection()
-                        cur = conn.cursor()
-                        cur.execute(
-                            """
-                            INSERT INTO income (
-                                    date, source, amount, truck_id, description,
-                                    driver_name, broker_number, tonu, stops,
-                                    pickup_date, pickup_time, pickup_city, pickup_state, pickup_zip, pickup_address, pickup_full_address,
-                                    delivery_date, delivery_time, delivery_city, delivery_state, delivery_zip, delivery_address, delivery_full_address,
-                                    rpm, empty_miles, loaded_miles
-                                )
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """, (
-                                date_val, source_val, amount_val, truck_id, load_number_val,
-                                driver_val, broker_val, tonu_val, stops_val,
-                                pickup_date_val, pickup_time_val, pickup_city_val, pickup_state_val, pickup_zip_val, pickup_full_address_val, pickup_full_address_val,
-                                delivery_date_val, delivery_time_val, delivery_city_val, delivery_state_val, delivery_zip_val, delivery_full_address_val, delivery_full_address_val,
-                                rpm_val, empty_miles_val, loaded_miles_val
-                            ))
-                        conn.commit()
-                        conn.close()
-                        st.success("Income added!")
-                        safe_rerun()
+                        # For now we only have simple address strings; keep *_city/state/zip null
+                        raw_ins = get_raw_db_connection()
+                        try:
+                            raw_ins.execute(
+                                sql_text(
+                                    """
+                                    INSERT INTO income (
+                                        date, source, amount, truck_id, description,
+                                        driver_name, broker_number, tonu, stops,
+                                        pickup_date, pickup_time, pickup_city, pickup_state, pickup_zip, pickup_address, pickup_full_address,
+                                        delivery_date, delivery_time, delivery_city, delivery_state, delivery_zip, delivery_address, delivery_full_address,
+                                        rpm, empty_miles, loaded_miles
+                                    )
+                                    VALUES (
+                                        :date_val, :source_val, :amount_val, :truck_id_val, :desc_val,
+                                        NULL, NULL, NULL, NULL,
+                                        :p_date, :p_time, NULL, NULL, NULL, :p_addr, :p_addr,
+                                        :d_date, :d_time, NULL, NULL, NULL, :d_addr, :d_addr,
+                                        :rpm_val, :empty_miles_val, :loaded_miles_val
+                                    )
+                                    """
+                                ),
+                                {
+                                    "date_val": income_date,
+                                    "source_val": source,
+                                    "amount_val": amount,
+                                    "truck_id_val": truck_id,
+                                    "desc_val": load_number,
+                                    "p_date": pickup_date,
+                                    "p_time": str(pickup_time) if pickup_time else None,
+                                    "p_addr": pickup_address,
+                                    "d_date": delivery_date,
+                                    "d_time": str(delivery_time) if delivery_time else None,
+                                    "d_addr": delivery_address,
+                                    "rpm_val": rpm,
+                                    "empty_miles_val": empty_miles,
+                                    "loaded_miles_val": loaded_miles,
+                                },
+                            )
+                            raw_ins.commit()
+                            st.success("Income added!")
+                            safe_rerun()
+                        except Exception as e:
+                            st.error(f"Error adding income: {e}")
+                        finally:
+                            raw_ins.close()
         else:
             st.warning("No trucks available. Please add trucks first.")
 
