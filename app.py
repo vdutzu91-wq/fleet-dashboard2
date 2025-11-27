@@ -2757,7 +2757,8 @@ elif page == "Trucks":
                             loan_end_input = loan_start_input
 
                         # Driver selector
-                        drivers = get_drivers()  # list[dict] or DataFrame; handle both
+                        drivers = get_drivers()   # can be list[dict] or DataFrame
+
                         driver_options = ["No Driver Assigned"]
                         driver_ids = [None]
 
@@ -2770,12 +2771,14 @@ elif page == "Trucks":
                             for _, r in drivers.iterrows():
                                 driver_options.append(f"{r['name']} ({r.get('license_number') or ''})")
                                 driver_ids.append(r["driver_id"])
+
                         current_driver_idx = 0
-                        if raw_driver_id:
+                        if raw_driver_id is not None:
                             try:
                                 current_driver_idx = driver_ids.index(raw_driver_id)
                             except ValueError:
                                 current_driver_idx = 0
+
                         selected_driver_idx = st.selectbox(
                             "Assigned Driver",
                             range(len(driver_options)),
@@ -2784,8 +2787,9 @@ elif page == "Trucks":
                         )
                         new_driver_id = driver_ids[selected_driver_idx]
 
-                        # Dispatcher selector (get_all_dispatchers returns list of dicts)
+                        # Dispatcher selector (get_all_dispatchers returns list[dict])
                         dispatchers = get_all_dispatchers()  # list[dict]
+
                         dispatcher_options = ["No Dispatcher Assigned"]
                         dispatcher_ids = [None]
 
@@ -2857,6 +2861,39 @@ elif page == "Trucks":
                                 )
                                 prev = cur.fetchone()
                                 prev_driver_id = prev[1] if prev else None
+
+                                debug_params = (
+                                    new_number,
+                                    new_make,
+                                    new_model,
+                                    new_year,
+                                    new_plate,
+                                    new_vin,
+                                    new_status,
+                                    float(new_loan or 0.0),
+                                    new_driver_id,
+                                    new_dispatcher_id,
+                                    selected_truck,
+                                )
+                                print("DEBUG update_truck param types:", [type(p) for p in debug_params])
+
+                                cur.execute(
+                                    """
+                                    UPDATE trucks
+                                    SET number = %s,
+                                        make = %s,
+                                        model = %s,
+                                        year = %s,
+                                        plate = %s,
+                                        vin = %s,
+                                        status = %s,
+                                        loan_amount = %s,
+                                        driver_id = %s,
+                                        dispatcher_id = %s
+                                    WHERE truck_id = %s
+                                    """,
+                                    debug_params,
+                                )
 
                                 # Update truck core fields
                                 cur.execute(
