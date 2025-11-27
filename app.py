@@ -3252,17 +3252,19 @@ elif page == "Trailers":
     with tab1:
         trailers_df = get_trailers()
         if not trailers_df.empty:
-            st.dataframe(trailers_df, use_container_width=True)
+            st.dataframe(trailers_df, width='stretch')
             st.subheader("Edit or Delete Trailer")
 
             selected_trailer = st.selectbox(
                 "Select Trailer",
-                options=trailers_df['trailer_id'].tolist(),
+                options=trailers_df["trailer_id"].tolist(),
                 format_func=lambda x: f"{trailers_df[trailers_df['trailer_id'] == x]['number'].iloc[0]}",
             )
 
             if selected_trailer:
-                trailer_data = trailers_df[trailers_df['trailer_id'] == selected_trailer].iloc[0]
+                trailer_data = trailers_df[
+                    trailers_df["trailer_id"] == selected_trailer
+                ].iloc[0]
                 col1, col2 = st.columns(2)
                 with col1:
                     if st.button("✏️ Edit Trailer", key="edit_trailer"):
@@ -3273,60 +3275,75 @@ elif page == "Trailers":
                         st.success("Trailer deleted successfully!")
                         safe_rerun()
 
-                if st.session_state.get('editing_trailer') == selected_trailer:
+                if st.session_state.get("editing_trailer") == selected_trailer:
                     st.subheader("Edit Trailer Details")
                     with st.form(f"edit_trailer_form_{selected_trailer}"):
-                        new_number = st.text_input("Trailer Number", value=trailer_data['number'] or "")
-                        new_type = st.text_input("Type", value=trailer_data['type'] or "")
+                        new_number = st.text_input(
+                            "Trailer Number", value=trailer_data["number"] or ""
+                        )
+                        new_type = st.text_input(
+                            "Type", value=trailer_data["type"] or ""
+                        )
                         new_year = st.number_input(
                             "Year",
-                            value=int(trailer_data['year']) if trailer_data['year'] else 2020,
+                            value=int(trailer_data["year"])
+                            if trailer_data["year"]
+                            else 2020,
                             min_value=1900,
                             max_value=2100,
                         )
-                        new_plate = st.text_input("Plate", value=trailer_data['plate'] or "")
-                        new_vin = st.text_input("VIN", value=trailer_data['vin'] or "")
+                        new_plate = st.text_input(
+                            "Plate", value=trailer_data["plate"] or ""
+                        )
+                        new_vin = st.text_input("VIN", value=trailer_data["vin"] or "")
                         new_status = st.selectbox(
                             "Status",
                             ["Active", "Inactive", "Maintenance"],
-                            index=["Active", "Inactive", "Maintenance"].index(trailer_data['status'])
-                                  if trailer_data['status'] in ["Active", "Inactive", "Maintenance"]
-                                  else 0,
+                            index=(
+                                ["Active", "Inactive", "Maintenance"].index(
+                                    trailer_data["status"]
+                                )
+                                if trailer_data["status"]
+                                in ["Active", "Inactive", "Maintenance"]
+                                else 0
+                            ),
                         )
                         new_loan = st.number_input(
                             "Loan Amount (monthly)",
-                            value=float(trailer_data['loan_amount']) if trailer_data['loan_amount'] else 0.0,
+                            value=float(trailer_data["loan_amount"])
+                            if trailer_data["loan_amount"]
+                            else 0.0,
                             min_value=0.0,
                         )
 
                         # --- Trailer loan start/end controls ---
+                        from sqlalchemy import text
+
                         conn_pref_tr = get_raw_db_connection()
                         try:
-                            df_open_tr = pd.read_sql_query(
-                                """
-                                SELECT id, monthly_amount, DATE(start_date) AS s
-                                FROM loans_history
-                                WHERE entity_type='trailer' AND entity_id=%s 
-                                  AND (end_date IS NULL OR end_date = '' OR end_date::date > CURRENT_DATE)
-                                ORDER BY DATE(start_date) DESC
-                                LIMIT 1
-                                """,
-                                conn_pref_tr,
-                                params=(int(selected_trailer),),
+                            result_tr = conn_pref_tr.execute(
+                                text(
+                                    """
+                                    SELECT id, monthly_amount, start_date
+                                    FROM loans_history
+                                    WHERE entity_type = 'trailer' AND entity_id = :eid
+                                      AND end_date IS NULL
+                                    ORDER BY start_date DESC
+                                    LIMIT 1
+                                    """
+                                ),
+                                {"eid": int(selected_trailer)},
                             )
+                            row_tr = result_tr.fetchone()
                         finally:
                             conn_pref_tr.close()
 
                         # Safe prefill
                         today_d = date.today()
                         pref_start_tr = today_d
-                        if df_open_tr is not None and not df_open_tr.empty:
-                            raw_s_tr = str(df_open_tr.iloc[0].get("s")) if "s" in df_open_tr.columns else None
-                            try:
-                                if raw_s_tr and raw_s_tr != "NaT":
-                                    pref_start_tr = date.fromisoformat(raw_s_tr)
-                            except Exception:
-                                pref_start_tr = today_d
+                        if row_tr:
+                            # row_tr[2] is start_date, already a date object
+                            pref_start_tr = row_tr[2] if row_tr[2] else today_d
 
                         pref_start_tr = max(pref_start_tr, COMPANY_START)
                         max_allowed = date(2100, 12, 31)
@@ -3359,23 +3376,40 @@ elif page == "Trailers":
                         # Defensive clamps
                         if loan_start_input_tr < COMPANY_START:
                             loan_start_input_tr = COMPANY_START
-                        if loan_end_input_tr and loan_end_input_tr < loan_start_input_tr:
+                        if (
+                            loan_end_input_tr
+                            and loan_end_input_tr < loan_start_input_tr
+                        ):
                             st.warning("Loan end date cannot be before start date.")
                             loan_end_input_tr = loan_start_input_tr
 
-                        # Truck assignment
-                        trucks_df = get_trucks()
-                        truck_options = ["No Truck Assigned"] + [
-                            f"{r['number']} - {r['make'] or ''} {r['model'] or ''}".strip()
-                            for _, r in trucks_df.iterrows()
-                        ]
-                        truck_ids = [None] + trucks_df['truck_id'].tolist()
+                        # Truck assignment (supports DataFrame or list[dict])
+                        trucks = get_trucks()
+                        truck_options = ["No Truck Assigned"]
+                        truck_ids = [None]
+
+                        if isinstance(trucks, list):
+                            for t in trucks:
+                                truck_options.append(
+                                    f"{t.get('number','')} - {t.get('make') or ''} {t.get('model') or ''}".strip()
+                                )
+                                truck_ids.append(t.get("truck_id"))
+                        else:
+                            # assume DataFrame
+                            for _, r in trucks.iterrows():
+                                truck_options.append(
+                                    f"{r['number']} - {r.get('make') or ''} {r.get('model') or ''}".strip()
+                                )
+                                truck_ids.append(r["truck_id"])
+
                         current_truck_idx = 0
-                        if trailer_data['truck_id']:
+                        raw_truck_id = trailer_data["truck_id"]
+                        if raw_truck_id is not None:
                             try:
-                                current_truck_idx = truck_ids.index(trailer_data['truck_id'])
+                                current_truck_idx = truck_ids.index(raw_truck_id)
                             except ValueError:
                                 current_truck_idx = 0
+
                         selected_truck_idx = st.selectbox(
                             "Assigned Truck",
                             range(len(truck_options)),
@@ -3391,46 +3425,89 @@ elif page == "Trailers":
                             cancelled = st.form_submit_button("❌ Cancel")
 
                     # Handle form actions
-                    if 'editing_trailer' in st.session_state and st.session_state.editing_trailer == selected_trailer:
+                    if (
+                        "editing_trailer" in st.session_state
+                        and st.session_state.editing_trailer == selected_trailer
+                    ):
                         if cancelled:
                             del st.session_state.editing_trailer
                             safe_rerun()
 
                         if saved:
                             try:
-                                # Update trailer row
-                                conn = get_db_connection()
-                                cur = conn.cursor()
-                                cur.execute(
-                                    "SELECT loan_amount, truck_id FROM trailers WHERE trailer_id=?",
-                                    (selected_trailer,),
-                                )
-                                prev = cur.fetchone()
-                                prev_loan = float(prev[0]) if prev and prev[0] is not None else 0.0
-                                prev_truck_id = prev[1] if prev else None
+                                # Normalize truck_id
+                                def to_int_or_none(v):
+                                    if isinstance(v, dict):
+                                        for k in ("truck_id", "id"):
+                                            if k in v:
+                                                v = v[k]
+                                                break
+                                    if isinstance(v, (list, tuple)):
+                                        for x in v:
+                                            if not isinstance(x, (dict, list)):
+                                                v = x
+                                                break
+                                    try:
+                                        return int(v) if v is not None and v != "" else None
+                                    except Exception:
+                                        return None
 
-                                cur.execute(
-                                    """
-                                    UPDATE trailers
-                                    SET number=?, type=?, year=?, plate=?, vin=?, status=?, loan_amount=?, truck_id=?
-                                    WHERE trailer_id=?
-                                    """,
-                                    (
-                                        new_number,
-                                        new_type,
-                                        new_year,
-                                        new_plate,
-                                        new_vin,
-                                        new_status,
-                                        new_loan,
-                                        new_truck_id,
-                                        selected_trailer,
-                                    ),
-                                )
-                                conn.commit()
-                                conn.close()
+                                norm_truck_id = to_int_or_none(new_truck_id)
 
-                                # Always upsert loan interval so date-only changes persist
+                                from sqlalchemy import text
+
+                                raw_conn = get_raw_db_connection()
+                                try:
+                                    # Get previous values
+                                    prev_result = raw_conn.execute(
+                                        text(
+                                            "SELECT loan_amount, truck_id FROM trailers WHERE trailer_id = :tid"
+                                        ),
+                                        {"tid": int(selected_trailer)},
+                                    )
+                                    prev = prev_result.fetchone()
+                                    prev_loan = (
+                                        float(prev[0])
+                                        if prev and prev[0] is not None
+                                        else 0.0
+                                    )
+                                    prev_truck_id = prev[1] if prev else None
+
+                                    # Update trailer row
+                                    update_params = {
+                                        "number": new_number,
+                                        "type": new_type,
+                                        "year": int(new_year) if new_year else None,
+                                        "plate": new_plate,
+                                        "vin": new_vin,
+                                        "status": new_status,
+                                        "loan_amount": float(new_loan or 0.0),
+                                        "truck_id": norm_truck_id,
+                                        "trailer_id": int(selected_trailer),
+                                    }
+
+                                    raw_conn.execute(
+                                        text(
+                                            """
+                                            UPDATE trailers
+                                            SET number = :number,
+                                                type = :type,
+                                                year = :year,
+                                                plate = :plate,
+                                                vin = :vin,
+                                                status = :status,
+                                                loan_amount = :loan_amount,
+                                                truck_id = :truck_id
+                                            WHERE trailer_id = :trailer_id
+                                            """
+                                        ),
+                                        update_params,
+                                    )
+                                    raw_conn.commit()
+                                finally:
+                                    raw_conn.close()
+
+                                # Loan history upsert
                                 try:
                                     upsert_current_loan(
                                         "trailer",
@@ -3440,45 +3517,20 @@ elif page == "Trailers":
                                         loan_end_input_tr,
                                     )
                                 except Exception as e:
-                                    st.warning(f"Trailer loan history update warning: {e}")
+                                    st.warning(
+                                        f"Trailer loan history update warning: {e}"
+                                    )
 
                                 # Trailer assignment history
-                                if new_truck_id != prev_truck_id:
+                                if norm_truck_id != prev_truck_id:
                                     record_trailer_assignment(
                                         selected_trailer,
-                                        new_truck_id,
+                                        norm_truck_id,
                                         start_date=date.today(),
                                         note="Assigned via UI",
                                     )
 
-                                # Requery to confirm
-                                try:
-                                    conn_chk = get_db_connection()
-                                    df_chk = pd.read_sql_query(
-                                        """
-                                        SELECT DATE(start_date) AS s, monthly_amount,
-                                               CASE WHEN end_date IS NULL OR end_date='' THEN NULL ELSE DATE(end_date) END AS e
-                                        FROM loans_history
-                                        WHERE entity_type='trailer' AND entity_id=?
-                                        ORDER BY (CASE WHEN e IS NULL THEN 0 ELSE 1 END), DATE(s) DESC
-                                        LIMIT 1
-                                        """,
-                                        conn_chk,
-                                        params=(int(selected_trailer),),
-                                    )
-                                    conn_chk.close()
-                                    if df_chk is not None and not df_chk.empty:
-                                        st.success(
-                                            f"Trailer updated. Current loan -> start={df_chk.iloc[0]['s']}, "
-                                            f"amount={df_chk.iloc[0]['monthly_amount']}, end={df_chk.iloc[0]['e']}"
-                                        )
-                                    else:
-                                        st.success("Trailer updated.")
-                                except Exception as e2:
-                                    st.success("Trailer updated.")
-                                    st.info(f"(Post-save check issue: {e2})")
-
-                                # Exit edit mode
+                                st.success("Trailer updated.")
                                 del st.session_state.editing_trailer
                                 safe_rerun()
                             except Exception as e:
@@ -3495,15 +3547,33 @@ elif page == "Trailers":
             plate = st.text_input("Plate Number")
             vin = st.text_input("VIN")
             status = st.selectbox("Status", ["Active", "Inactive", "Maintenance"])
-            loan_amount = st.number_input("Loan Amount (monthly)", min_value=0.0, value=0.0)
+            loan_amount = st.number_input(
+                "Loan Amount (monthly)", min_value=0.0, value=0.0
+            )
 
-            trucks_df = get_trucks()
-            truck_options = ["No Truck Assigned"] + [
-                f"{r['number']} - {r['make'] or ''} {r['model'] or ''}".strip() for _, r in trucks_df.iterrows()
-            ]
-            truck_ids = [None] + trucks_df['truck_id'].tolist()
+            # Truck assignment (supports DataFrame or list[dict])
+            trucks = get_trucks()
+            truck_options = ["No Truck Assigned"]
+            truck_ids = [None]
+
+            if isinstance(trucks, list):
+                for t in trucks:
+                    truck_options.append(
+                        f"{t.get('number','')} - {t.get('make') or ''} {t.get('model') or ''}".strip()
+                    )
+                    truck_ids.append(t.get("truck_id"))
+            else:
+                # assume DataFrame
+                for _, r in trucks.iterrows():
+                    truck_options.append(
+                        f"{r['number']} - {r.get('make') or ''} {r.get('model') or ''}".strip()
+                    )
+                    truck_ids.append(r["truck_id"])
+
             selected_truck_idx = st.selectbox(
-                "Assigned Truck", range(len(truck_options)), format_func=lambda x: truck_options[x]
+                "Assigned Truck",
+                range(len(truck_options)),
+                format_func=lambda x: truck_options[x],
             )
             truck_id = truck_ids[selected_truck_idx]
 
@@ -3512,21 +3582,62 @@ elif page == "Trailers":
                     st.error("Trailer number is required.")
                 else:
                     try:
-                        conn = get_db_connection()
-                        cur = conn.cursor()
-                        cur.execute(
-                            """
-                            INSERT INTO trailers (number, type, year, plate, vin, status, loan_amount, truck_id)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            (number, trailer_type, year, plate, vin, status, loan_amount, truck_id),
-                        )
-                        trailer_id = cur.lastrowid
-                        conn.commit()
-                        conn.close()
+                        # Normalize truck_id
+                        def to_int_or_none(v):
+                            if isinstance(v, dict):
+                                for k in ("truck_id", "id"):
+                                    if k in v:
+                                        v = v[k]
+                                        break
+                            if isinstance(v, (list, tuple)):
+                                for x in v:
+                                    if not isinstance(x, (dict, list)):
+                                        v = x
+                                        break
+                            try:
+                                return int(v) if v is not None and v != "" else None
+                            except Exception:
+                                return None
 
-                        if loan_amount and loan_amount > 0:
-                            # Start loan today by default on create
+                        norm_truck_id = to_int_or_none(truck_id)
+
+                        from sqlalchemy import text
+
+                        raw_conn = get_raw_db_connection()
+                        try:
+                            insert_params = {
+                                "number": number,
+                                "type": trailer_type,
+                                "year": int(year) if year else None,
+                                "plate": plate,
+                                "vin": vin,
+                                "status": status,
+                                "loan_amount": float(loan_amount or 0.0),
+                                "truck_id": norm_truck_id,
+                            }
+
+                            result = raw_conn.execute(
+                                text(
+                                    """
+                                    INSERT INTO trailers (
+                                        number, type, year, plate, vin, status, loan_amount, truck_id
+                                    )
+                                    VALUES (
+                                        :number, :type, :year, :plate, :vin, :status, :loan_amount, :truck_id
+                                    )
+                                    RETURNING trailer_id
+                                    """
+                                ),
+                                insert_params,
+                            )
+                            row = result.fetchone()
+                            trailer_id = row[0] if row else None
+                            raw_conn.commit()
+                        finally:
+                            raw_conn.close()
+
+                        # Loan history
+                        if trailer_id and loan_amount and loan_amount > 0:
                             try:
                                 upsert_current_loan(
                                     "trailer",
@@ -3536,17 +3647,23 @@ elif page == "Trailers":
                                     None,
                                 )
                             except Exception as e:
-                                st.warning(f"Initial trailer loan history warning: {e}")
+                                st.warning(
+                                    f"Initial trailer loan history warning: {e}"
+                                )
 
-                        if truck_id:
+                        # Trailer assignment history
+                        if trailer_id and norm_truck_id:
                             record_trailer_assignment(
-                                trailer_id, truck_id, start_date=date.today(), note="Assigned on create"
+                                trailer_id,
+                                norm_truck_id,
+                                start_date=date.today(),
+                                note="Assigned on create",
                             )
 
                         st.success("Trailer added successfully!")
                         safe_rerun()
-                    except Exception:
-                        st.error("Trailer number already exists.")
+                    except Exception as e:
+                        st.error(f"Failed to add trailer (maybe number exists?): {e}")
 
 # -------------------------
 # Drivers Management
