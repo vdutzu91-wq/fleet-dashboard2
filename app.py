@@ -2881,59 +2881,57 @@ elif page == "Trucks":
                                     },
                                 )
 
-                                conn = get_db_connection()
-                                cur = conn.cursor()
+                                # Use RAW connection here to avoid wrapper/psycopg weirdness
+                                from sqlalchemy import text
 
-                                # Get previous values (for history)
-                                cur.execute(
-                                    "SELECT loan_amount, driver_id FROM trucks WHERE truck_id = %s",
-                                    (selected_truck,),
-                                )
-                                prev = cur.fetchone()
-                                prev_driver_id = prev[1] if prev else None
+                                raw_conn = get_raw_db_connection()
+                                try:
+                                    # Get previous values (for history)
+                                    prev = raw_conn.execute(
+                                        text("SELECT loan_amount, driver_id FROM trucks WHERE truck_id = :tid"),
+                                        {"tid": int(selected_truck)},
+                                    ).fetchone()
+                                    prev_driver_id = prev[1] if prev else None
 
-                                # Build UPDATE params as a flat tuple
-                                update_params = (
-                                    new_number,
-                                    new_make,
-                                    new_model,
-                                    int(new_year) if new_year is not None else None,
-                                    new_plate,
-                                    new_vin,
-                                    new_status,
-                                    float(new_loan or 0.0),
-                                    norm_driver_id,
-                                    norm_dispatcher_id,
-                                    int(selected_truck),
-                                )
+                                    # Build UPDATE params as a dict
+                                    update_params_dict = {
+                                        "number": new_number,
+                                        "make": new_make,
+                                        "model": new_model,
+                                        "year": int(new_year) if new_year is not None else None,
+                                        "plate": new_plate,
+                                        "vin": new_vin,
+                                        "status": new_status,
+                                        "loan_amount": float(new_loan or 0.0),
+                                        "driver_id": norm_driver_id,
+                                        "dispatcher_id": norm_dispatcher_id,
+                                        "truck_id": int(selected_truck),
+                                    }
 
-                                st.write("DEBUG update_params values:", list(update_params))
-                                st.write(
-                                    "DEBUG update_params types:",
-                                    [type(p).__name__ for p in update_params],
-                                )
+                                    st.write("DEBUG update_params_dict:", update_params_dict)
 
-                                # Core truck UPDATE only (no trailer logic yet)
-                                cur.execute(
-                                    """
-                                    UPDATE trucks
-                                    SET number = %s,
-                                        make = %s,
-                                        model = %s,
-                                        year = %s,
-                                        plate = %s,
-                                        vin = %s,
-                                        status = %s,
-                                        loan_amount = %s,
-                                        driver_id = %s,
-                                        dispatcher_id = %s
-                                    WHERE truck_id = %s
-                                    """,
-                                    update_params,
-                                )
-
-                                conn.commit()
-                                conn.close()
+                                    raw_conn.execute(
+                                        text(
+                                            """
+                                            UPDATE trucks
+                                            SET number = :number,
+                                                make = :make,
+                                                model = :model,
+                                                year = :year,
+                                                plate = :plate,
+                                                vin = :vin,
+                                                status = :status,
+                                                loan_amount = :loan_amount,
+                                                driver_id = :driver_id,
+                                                dispatcher_id = :dispatcher_id
+                                            WHERE truck_id = :truck_id
+                                            """
+                                        ),
+                                        update_params_dict,
+                                    )
+                                    raw_conn.commit()
+                                finally:
+                                   raw_conn.close()
 
                                 # Loan history upsert
                                 try:
