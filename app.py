@@ -2916,36 +2916,48 @@ elif page == "Trucks":
                                     },
                                 )
 
-                                # Update truck core fields
-                                cur.execute(
-                                    """
-                                    UPDATE trucks
-                                    SET number = %s,
-                                        make = %s,
-                                        model = %s,
-                                        year = %s,
-                                        plate = %s,
-                                        vin = %s,
-                                        status = %s,
-                                        loan_amount = %s,
-                                        driver_id = %s,
-                                        dispatcher_id = %s
-                                    WHERE truck_id = %s
-                                    """,
-                                    (
-                                        new_number,
-                                        new_make,
-                                        new_model,
-                                        new_year,
-                                        new_plate,
-                                        new_vin,
-                                        new_status,
-                                        float(new_loan or 0.0),
-                                       new_driver_id,
-                                        new_dispatcher_id,
-                                        selected_truck,
-                                    ),
+                                # Build params tuple explicitly
+                                update_params = (
+                                    new_number,
+                                    new_make,
+                                    new_model,
+                                    int(new_year) if new_year is not None else None,
+                                    new_plate,
+                                    new_vin,
+                                    new_status,
+                                    float(new_loan or 0.0),
+                                    new_driver_id,
+                                    new_dispatcher_id,
+                                    int(selected_truck),
                                 )
+
+                                # Show exact values & types next to the error in the UI
+                                st.write("DEBUG update_params values:", list(update_params))
+                                st.write("DEBUG update_params types:", [type(p).__name__ for p in update_params])
+
+                                # Try the UPDATE with a very small wrapper so we see *exactly* where it fails
+                                try:
+                                    cur.execute(
+                                        """
+                                        UPDATE trucks
+                                        SET number = %s,
+                                            make = %s,
+                                            model = %s,
+                                            year = %s,
+                                            plate = %s,
+                                            vin = %s,
+                                            status = %s,
+                                            loan_amount = %s,
+                                            driver_id = %s,
+                                            dispatcher_id = %s
+                                        WHERE truck_id = %s
+                                        """,
+                                        update_params,
+                                    )
+                                except Exception as e_upd:
+                                    st.error(f"INNER UPDATE ERROR: {e_upd}")
+                                    # To avoid masking the inner error, re-raise so outer except can still show generic message
+                                    raise
 
                                 # Trailer linkage in trailers table
                                 if new_trailer_id is None:
