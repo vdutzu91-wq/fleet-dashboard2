@@ -3671,15 +3671,23 @@ elif page == "Trailers":
 elif page == "Drivers":
     st.header("👨‍💼 Drivers Management")
     tab1, tab2 = st.tabs(["View Drivers", "Add New Driver"])
+
     with tab1:
         drivers_df = get_drivers()
         if not drivers_df.empty:
-            st.dataframe(drivers_df, use_container_width=True)
+            st.dataframe(drivers_df, width='stretch')
             st.subheader("Edit or Delete Driver")
-            selected_driver = st.selectbox("Select Driver", options=drivers_df['driver_id'].tolist(),
-                                           format_func=lambda x: drivers_df[drivers_df['driver_id']==x]['name'].iloc[0])
+            selected_driver = st.selectbox(
+                "Select Driver",
+                options=drivers_df["driver_id"].tolist(),
+                format_func=lambda x: drivers_df[drivers_df["driver_id"] == x][
+                    "name"
+                ].iloc[0],
+            )
             if selected_driver:
-                driver_data = drivers_df[drivers_df['driver_id'] == selected_driver].iloc[0]
+                driver_data = drivers_df[
+                    drivers_df["driver_id"] == selected_driver
+                ].iloc[0]
                 col1, col2 = st.columns(2)
                 with col1:
                     if st.button("✏️ Edit Driver", key="edit_driver"):
@@ -3689,34 +3697,99 @@ elif page == "Drivers":
                         delete_record("drivers", "driver_id", selected_driver)
                         st.success("Driver deleted successfully!")
                         safe_rerun()
-                if st.session_state.get('editing_driver') == selected_driver:
+
+                if st.session_state.get("editing_driver") == selected_driver:
                     with st.form("edit_driver_form"):
-                        new_name = st.text_input("Name", value=driver_data['name'])
-                        new_license = st.text_input("License Number", value=driver_data['license_number'] or "")
-                        new_phone = st.text_input("Phone", value=driver_data['phone'] or "")
-                        new_email = st.text_input("Email", value=driver_data['email'] or "")
-                        new_hire_date = st.date_input("Hire Date", value=datetime.strptime(driver_data['hire_date'], '%Y-%m-%d').date() if driver_data['hire_date'] else date.today())
-                        new_status = st.selectbox("Status", ["Active", "Inactive"], index=["Active", "Inactive"].index(driver_data['status']) if driver_data['status'] in ["Active", "Inactive"] else 0)
+                        new_name = st.text_input("Name", value=driver_data["name"])
+                        new_license = st.text_input(
+                            "License Number", value=driver_data["license_number"] or ""
+                        )
+                        new_phone = st.text_input(
+                            "Phone", value=driver_data["phone"] or ""
+                        )
+                        new_email = st.text_input(
+                            "Email", value=driver_data["email"] or ""
+                        )
+
+                        # Safe hire_date parsing
+                        hire_val = date.today()
+                        if driver_data["hire_date"]:
+                            try:
+                                hire_val = datetime.strptime(
+                                    driver_data["hire_date"], "%Y-%m-%d"
+                                ).date()
+                            except Exception:
+                                hire_val = date.today()
+
+                        new_hire_date = st.date_input("Hire Date", value=hire_val)
+                        new_status = st.selectbox(
+                            "Status",
+                            ["Active", "Inactive"],
+                            index=(
+                                ["Active", "Inactive"].index(driver_data["status"])
+                                if driver_data["status"] in ["Active", "Inactive"]
+                                else 0
+                            ),
+                        )
+
                         col1, col2 = st.columns(2)
                         with col1:
-                            if st.form_submit_button("💾 Save Changes"):
-                                conn = get_db_connection()
-                                cur = conn.cursor()
-                                cur.execute("""
-                                    UPDATE drivers SET name=?, license_number=?, phone=?, email=?, hire_date=?, status=?
-                                    WHERE driver_id=?
-                                """, (new_name, new_license, new_phone, new_email, new_hire_date, new_status, selected_driver))
-                                conn.commit()
-                                conn.close()
+                            saved = st.form_submit_button("💾 Save Changes")
+                        with col2:
+                            cancelled = st.form_submit_button("❌ Cancel")
+
+                    # Handle form actions
+                    if (
+                        "editing_driver" in st.session_state
+                        and st.session_state.editing_driver == selected_driver
+                    ):
+                        if cancelled:
+                            del st.session_state.editing_driver
+                            safe_rerun()
+
+                        if saved:
+                            try:
+                                from sqlalchemy import text
+
+                                raw_conn = get_raw_db_connection()
+                                try:
+                                    update_params = {
+                                        "name": new_name,
+                                        "license_number": new_license,
+                                        "phone": new_phone,
+                                        "email": new_email,
+                                        "hire_date": new_hire_date,
+                                        "status": new_status,
+                                        "driver_id": int(selected_driver),
+                                    }
+
+                                    raw_conn.execute(
+                                        text(
+                                            """
+                                            UPDATE drivers
+                                            SET name = :name,
+                                                license_number = :license_number,
+                                                phone = :phone,
+                                                email = :email,
+                                                hire_date = :hire_date,
+                                                status = :status
+                                            WHERE driver_id = :driver_id
+                                            """
+                                        ),
+                                        update_params,
+                                    )
+                                    raw_conn.commit()
+                                finally:
+                                    raw_conn.close()
+
                                 st.success("Driver updated successfully!")
                                 del st.session_state.editing_driver
                                 safe_rerun()
-                        with col2:
-                            if st.form_submit_button("❌ Cancel"):
-                                del st.session_state.editing_driver
-                                safe_rerun()
+                            except Exception as e:
+                                st.error(f"Driver update failed: {e}")
         else:
             st.info("No drivers found.")
+
     with tab2:
         st.subheader("Add New Driver")
         with st.form("add_driver"):
@@ -3726,20 +3799,49 @@ elif page == "Drivers":
             email = st.text_input("Email")
             hire_date = st.date_input("Hire Date", value=date.today())
             status = st.selectbox("Status", ["Active", "Inactive"])
+
             if st.form_submit_button("Add Driver"):
                 if not name:
                     st.error("Name required.")
                 else:
-                    conn = get_db_connection()
-                    cur = conn.cursor()
-                    cur.execute("""
-                        INSERT INTO drivers (name, license_number, phone, email, hire_date, status)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """, (name, license_number, phone, email, hire_date, status))
-                    conn.commit()
-                    conn.close()
-                    st.success("Driver added successfully!")
-                    safe_rerun()
+                    try:
+                        from sqlalchemy import text
+
+                        raw_conn = get_raw_db_connection()
+                        try:
+                            insert_params = {
+                                "name": name,
+                                "license_number": license_number,
+                                "phone": phone,
+                                "email": email,
+                                "hire_date": hire_date,
+                                "status": status,
+                            }
+
+                            result = raw_conn.execute(
+                                text(
+                                    """
+                                    INSERT INTO drivers (
+                                        name, license_number, phone, email, hire_date, status
+                                    )
+                                    VALUES (
+                                        :name, :license_number, :phone, :email, :hire_date, :status
+                                    )
+                                    RETURNING driver_id
+                                    """
+                                ),
+                                insert_params,
+                            )
+                            row = result.fetchone()
+                            driver_id = row[0] if row else None
+                            raw_conn.commit()
+                        finally:
+                            raw_conn.close()
+
+                        st.success("Driver added successfully!")
+                        safe_rerun()
+                    except Exception as e:
+                        st.error(f"Failed to add driver: {e}")
 
 # -------------------------
 # Expenses page (with bulk operations, attachments, preset filters, optimized queries)
