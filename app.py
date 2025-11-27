@@ -2812,20 +2812,28 @@ elif page == "Trucks":
                         )
                         new_dispatcher_id = dispatcher_ids[selected_dispatcher_idx]
 
-                        # Trailer selector (now editable): based on trailers.truck_id link
-                        trailers_df = get_all_trailers()
-                        trailer_options = ["No Trailer Assigned"] + trailers_df[
-                            "number"
-                        ].astype(str).tolist()
-                        trailer_ids = [None] + trailers_df["trailer_id"].tolist()
+                        # Trailer selector (single trailer per truck)
+                        trailers = get_all_trailers()  # DataFrame or list[dict]
+
+                        trailer_options = ["No Trailer Assigned"]
+                        trailer_ids = [None]
+
+                        if isinstance(trailers, list):
+                            for t in trailers:
+                                trailer_options.append(str(t.get("number", "")))
+                                trailer_ids.append(t.get("trailer_id"))
+                        else:
+                            # assume DataFrame
+                            trailer_options += trailers["number"].astype(str).tolist()
+                            trailer_ids += trailers["trailer_id"].tolist()
+
                         current_trailer_idx = 0
-                        if current_trailer_id:
+                        if current_trailer_id is not None:
                             try:
-                                current_trailer_idx = trailer_ids.index(
-                                    current_trailer_id
-                                )
+                                current_trailer_idx = trailer_ids.index(current_trailer_id)
                             except ValueError:
                                 current_trailer_idx = 0
+
                         selected_trailer_idx = st.selectbox(
                             "Assigned Trailer",
                             range(len(trailer_options)),
@@ -2871,12 +2879,14 @@ elif page == "Trucks":
 
                                 norm_driver_id = to_int_or_none(new_driver_id)
                                 norm_dispatcher_id = to_int_or_none(new_dispatcher_id)
+                                norm_trailer_id = to_int_or_none(new_trailer_id)
 
                                 st.write(
                                     "DEBUG normalized IDs:",
                                     {
                                         "driver": (norm_driver_id, type(norm_driver_id).__name__),
                                         "dispatcher": (norm_dispatcher_id, type(norm_dispatcher_id).__name__),
+                                        "trailer": (norm_trailer_id, type(norm_trailer_id).__name__),
                                         "truck": (selected_truck, type(selected_truck).__name__),
                                     },
                                 )
@@ -2932,6 +2942,40 @@ elif page == "Trucks":
                                     raw_conn.commit()
                                 finally:
                                    raw_conn.close()
+
+                                # --- Trailer linkage: single trailer per truck, using wrapper connection ---
+                                tconn = get_db_connection()
+                                tcur = tconn.cursor()
+                                try:
+                                    if norm_trailer_id is None:
+                                        # Unassign this truck from any trailers
+                                        tcur.execute(
+                                            "UPDATE trailers SET truck_id = NULL WHERE truck_id = %s",
+                                            (int(selected_truck),),
+                                        )
+                                    else:
+                                        # Clear this trailer from any previous truck
+                                        tcur.execute(
+                                            "UPDATE trailers SET truck_id = NULL WHERE trailer_id = %s",
+                                            (norm_trailer_id,),
+                                        )
+                                        # Link this trailer to this truck
+                                        tcur.execute(
+                                            "UPDATE trailers SET truck_id = %s WHERE trailer_id = %s",
+                                            (int(selected_truck), norm_trailer_id),
+                                        )
+                                        # Ensure no other trailers remain linked to this truck
+                                        tcur.execute(
+                                            """
+                                            UPDATE trailers
+                                            SET truck_id = NULL
+                                            WHERE truck_id = %s AND trailer_id <> %s
+                                            """,
+                                            (int(selected_truck), norm_trailer_id),
+                                        )
+                                    tconn.commit()
+                                finally:
+                                    tconn.close()
 
                                 # Loan history upsert
                                 try:
