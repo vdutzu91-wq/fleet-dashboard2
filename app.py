@@ -2840,21 +2840,51 @@ elif page == "Trucks":
                         with col2:
                             cancelled = st.form_submit_button("❌ Cancel")
 
-                    # Handle form actions
-                    if 'editing_truck' in st.session_state and st.session_state.editing_truck == selected_truck:
+                    # Handle form actions (REPLACED BLOCK)
+                    if "editing_truck" in st.session_state and st.session_state.editing_truck == selected_truck:
                         if cancelled:
                             del st.session_state.editing_truck
                             safe_rerun()
 
                         if saved:
                             try:
-                                # VERY loud debug so we know this executes
-                                st.write("DEBUG: Entering truck SAVE handler")
+                                st.write("DEBUG: Entering *new* truck SAVE handler")
+
+                                # Normalize IDs from selectors to simple ints/None
+                                def to_int_or_none(v):
+                                    if isinstance(v, dict):
+                                        # try common keys
+                                        for k in ("driver_id", "dispatcher_id", "trailer_id", "id"):
+                                            if k in v:
+                                                v = v[k]
+                                                break
+                                    if isinstance(v, (list, tuple)):
+                                        # just take first non-dict/list scalar if exists
+                                        for x in v:
+                                            if not isinstance(x, (dict, list)):
+                                                v = x
+                                                break
+                                    try:
+                                        return int(v) if v is not None and v != "" else None
+                                    except Exception:
+                                        return None
+
+                                norm_driver_id = to_int_or_none(new_driver_id)
+                                norm_dispatcher_id = to_int_or_none(new_dispatcher_id)
+
+                                st.write(
+                                    "DEBUG normalized IDs:",
+                                    {
+                                        "driver": (norm_driver_id, type(norm_driver_id).__name__),
+                                        "dispatcher": (norm_dispatcher_id, type(norm_dispatcher_id).__name__),
+                                        "truck": (selected_truck, type(selected_truck).__name__),
+                                    },
+                                )
 
                                 conn = get_db_connection()
                                 cur = conn.cursor()
 
-                                # Get previous values
+                                # Get previous values (for history)
                                 cur.execute(
                                     "SELECT loan_amount, driver_id FROM trucks WHERE truck_id = %s",
                                     (selected_truck,),
@@ -2862,61 +2892,7 @@ elif page == "Trucks":
                                 prev = cur.fetchone()
                                 prev_driver_id = prev[1] if prev else None
 
-                                # --- HARD GUARDS: ensure simple scalar types for IDs ---
-                                # driver
-                                if isinstance(new_driver_id, dict):
-                                    new_driver_id = new_driver_id.get("driver_id")
-                                if isinstance(new_driver_id, list):
-                                    # pick first valid element if any
-                                    new_driver_id = next(
-                                        (x for x in new_driver_id if not isinstance(x, (dict, list))),
-                                        None,
-                                    )
-
-                                # dispatcher
-                                if isinstance(new_dispatcher_id, dict):
-                                    new_dispatcher_id = new_dispatcher_id.get("dispatcher_id")
-                                if isinstance(new_dispatcher_id, list):
-                                    new_dispatcher_id = next(
-                                        (x for x in new_dispatcher_id if not isinstance(x, (dict, list))),
-                                        None,
-                                    )
-
-                                # trailer
-                                if isinstance(new_trailer_id, dict):
-                                    new_trailer_id = new_trailer_id.get("trailer_id")
-                                if isinstance(new_trailer_id, list):
-                                    new_trailer_id = next(
-                                        (x for x in new_trailer_id if not isinstance(x, (dict, list))),
-                                        None,
-                                    )
-
-                                # Final conversion: only ints or None for ids
-                                try:
-                                    new_driver_id = int(new_driver_id) if new_driver_id is not None else None
-                                except Exception:
-                                    new_driver_id = None
-                                try:
-                                    new_dispatcher_id = int(new_dispatcher_id) if new_dispatcher_id is not None else None
-                                except Exception:
-                                    new_dispatcher_id = None
-                                try:
-                                    new_trailer_id = int(new_trailer_id) if new_trailer_id is not None else None
-                                except Exception:
-                                    new_trailer_id = None
-
-                                # Debug: show types and values in the UI so we see them for sure
-                                st.write(
-                                    "DEBUG params:",
-                                    {
-                                        "new_driver_id": (new_driver_id, type(new_driver_id).__name__),
-                                        "new_dispatcher_id": (new_dispatcher_id, type(new_dispatcher_id).__name__),
-                                        "new_trailer_id": (new_trailer_id, type(new_trailer_id).__name__),
-                                        "selected_truck": (selected_truck, type(selected_truck).__name__),
-                                    },
-                                )
-
-                                # Build params tuple explicitly
+                                # Build UPDATE params as a flat tuple
                                 update_params = (
                                     new_number,
                                     new_make,
@@ -2926,66 +2902,35 @@ elif page == "Trucks":
                                     new_vin,
                                     new_status,
                                     float(new_loan or 0.0),
-                                    new_driver_id,
-                                    new_dispatcher_id,
+                                    norm_driver_id,
+                                    norm_dispatcher_id,
                                     int(selected_truck),
                                 )
 
-                                # Show exact values & types next to the error in the UI
                                 st.write("DEBUG update_params values:", list(update_params))
-                                st.write("DEBUG update_params types:", [type(p).__name__ for p in update_params])
+                                st.write(
+                                    "DEBUG update_params types:",
+                                    [type(p).__name__ for p in update_params],
+                                )
 
-                                # Try the UPDATE with a very small wrapper so we see *exactly* where it fails
-                                try:
-                                    cur.execute(
-                                        """
-                                        UPDATE trucks
-                                        SET number = %s,
-                                            make = %s,
-                                            model = %s,
-                                            year = %s,
-                                            plate = %s,
-                                            vin = %s,
-                                            status = %s,
-                                            loan_amount = %s,
-                                            driver_id = %s,
-                                            dispatcher_id = %s
-                                        WHERE truck_id = %s
-                                        """,
-                                        update_params,
-                                    )
-                                except Exception as e_upd:
-                                    st.error(f"INNER UPDATE ERROR: {e_upd}")
-                                    # To avoid masking the inner error, re-raise so outer except can still show generic message
-                                    raise
-
-                                # Trailer linkage in trailers table
-                                if new_trailer_id is None:
-                                    # Unassign this truck from any trailers
-                                    cur.execute(
-                                        "UPDATE trailers SET truck_id = NULL WHERE truck_id = %s",
-                                        (selected_truck,),
-                                    )
-                                else:
-                                    # Clear this trailer from any previous truck
-                                    cur.execute(
-                                        "UPDATE trailers SET truck_id = NULL WHERE trailer_id = %s",
-                                        (new_trailer_id,),
-                                    )
-                                    # Link to this truck
-                                    cur.execute(
-                                        "UPDATE trailers SET truck_id = %s WHERE trailer_id = %s",
-                                        (selected_truck, new_trailer_id),
-                                    )
-                                   # Ensure no other trailers remain linked to this truck
-                                    cur.execute(
-                                        """
-                                        UPDATE trailers
-                                        SET truck_id = NULL
-                                        WHERE truck_id = %s AND trailer_id <> %s
-                                        """,
-                                        (selected_truck, new_trailer_id),
-                                    )
+                                # Core truck UPDATE only (no trailer logic yet)
+                                cur.execute(
+                                    """
+                                    UPDATE trucks
+                                    SET number = %s,
+                                        make = %s,
+                                        model = %s,
+                                        year = %s,
+                                        plate = %s,
+                                        vin = %s,
+                                        status = %s,
+                                        loan_amount = %s,
+                                        driver_id = %s,
+                                        dispatcher_id = %s
+                                    WHERE truck_id = %s
+                                    """,
+                                    update_params,
+                                )
 
                                 conn.commit()
                                 conn.close()
@@ -3003,9 +2948,9 @@ elif page == "Trucks":
                                     st.warning(f"Truck loan history update warning: {e}")
 
                                 # Driver assignment history
-                                if new_driver_id and new_driver_id != prev_driver_id:
+                                if norm_driver_id and norm_driver_id != prev_driver_id:
                                     record_driver_assignment(
-                                        new_driver_id,
+                                        norm_driver_id,
                                         truck_id=selected_truck,
                                         start_date=date.today(),
                                         note="Assigned via UI",
