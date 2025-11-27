@@ -3860,20 +3860,29 @@ elif page == "Expenses":
         st.caption("Click this button once to add fuel gallons tracking to your expenses table")
         if st.button("Add Gallons Column to Expenses Table"):
             try:
-                conn_update = get_db_connection()
-                cur_update = conn_update.cursor()
-                
-                # Check if column already exists
-                columns = [col[1] for col in cur_update.fetchall()]
-                
-                if 'gallons' not in columns:
-                    cur_update.execute("ALTER TABLE expenses ADD COLUMN gallons REAL DEFAULT 0")
-                    conn_update.commit()
-                    st.success("✅ Gallons column added successfully!")
-                else:
-                    st.info("ℹ️ Gallons column already exists")
-                
-                conn_update.close()
+                from sqlalchemy import text
+                raw_conn = get_raw_db_connection()
+                try:
+                    # Check if column already exists
+                    result = raw_conn.execute(
+                        text(
+                            """
+                            SELECT column_name 
+                            FROM information_schema.columns 
+                            WHERE table_name = 'expenses' AND column_name = 'gallons'
+                            """
+                        )
+                    )
+                    exists = result.fetchone()
+                    
+                    if not exists:
+                        raw_conn.execute(text("ALTER TABLE expenses ADD COLUMN gallons REAL DEFAULT 0"))
+                        raw_conn.commit()
+                        st.success("✅ Gallons column added successfully!")
+                    else:
+                        st.info("ℹ️ Gallons column already exists")
+                finally:
+                    raw_conn.close()
             except Exception as e:
                 st.error(f"Error: {e}")
 
@@ -3888,9 +3897,23 @@ elif page == "Expenses":
         if s is None or (isinstance(s, float) and pd.isna(s)):
             return None
         return str(s).strip()
-    truck_display = ["[None]"] + [f"{_norm(r['number'])} (ID:{r['truck_id']})" for _, r in trucks_df.iterrows()]
-    truck_id_map = {f"{_norm(r['number'])} (ID:{r['truck_id']})": r['truck_id'] for _, r in trucks_df.iterrows()}
-    truck_id_reverse_map = {r['truck_id']: f"{_norm(r['number'])} (ID:{r['truck_id']})" for _, r in trucks_df.iterrows()}
+    
+    truck_display = ["[None]"]
+    truck_id_map = {}
+    truck_id_reverse_map = {}
+    
+    if isinstance(trucks_df, list):
+        for t in trucks_df:
+            label = f"{_norm(t.get('number'))} (ID:{t.get('truck_id')})"
+            truck_display.append(label)
+            truck_id_map[label] = t.get('truck_id')
+            truck_id_reverse_map[t.get('truck_id')] = label
+    else:
+        for _, r in trucks_df.iterrows():
+            label = f"{_norm(r['number'])} (ID:{r['truck_id']})"
+            truck_display.append(label)
+            truck_id_map[label] = r['truck_id']
+            truck_id_reverse_map[r['truck_id']] = label
 
     # Tabs/sections (top buttons)
     top_buttons = ["All Expenses", "Maintenance"] + [c for c in category_names if c != "Maintenance"] + ["Manage Categories", "+ New Category"]
@@ -3929,14 +3952,22 @@ elif page == "Expenses":
         st.stop()
 
     # Top metrics (selected range + YTD)
-    conn_tot = get_db_connection()
+    raw_conn_tot = get_raw_db_connection()
     try:
-        df_range = pd.read_sql_query("SELECT amount FROM expenses WHERE date BETWEEN ? AND ?", conn_tot, params=(start_date, end_date))
-        df_ytd = pd.read_sql_query("SELECT amount FROM expenses WHERE date BETWEEN ? AND ?", conn_tot, params=(date(date.today().year, 1, 1), date.today()))
+        df_range = pd.read_sql_query(
+            "SELECT amount FROM expenses WHERE date BETWEEN %s AND %s",
+            raw_conn_tot,
+            params=(start_date, end_date),
+        )
+        df_ytd = pd.read_sql_query(
+            "SELECT amount FROM expenses WHERE date BETWEEN %s AND %s",
+            raw_conn_tot,
+            params=(date(date.today().year, 1, 1), date.today()),
+        )
     finally:
-        conn_tot.close()
-    total_range = df_range['amount'].sum() if not df_range.empty else 0.0
-    total_ytd = df_ytd['amount'].sum() if not df_ytd.empty else 0.0
+        raw_conn_tot.close()
+    total_range = df_range["amount"].sum() if not df_range.empty else 0.0
+    total_ytd = df_ytd["amount"].sum() if not df_ytd.empty else 0.0
     m1, m2 = st.columns(2)
     m1.metric("Total (Selected Range)", f"${total_range:,.2f}")
     m2.metric("Year-to-Date (YTD)", f"${total_ytd:,.2f}")
@@ -3960,11 +3991,15 @@ elif page == "Expenses":
         for i, field in enumerate(st.session_state["new_category_fields"]):
             c1, c2, c3 = st.columns([3, 2, 0.6])
             with c1:
-                st.session_state["new_category_fields"][i]["label"] = st.text_input(f"Field {i+1} Label", value=field["label"], key=f"new_field_label_{i}")
+                st.session_state["new_category_fields"][i]["label"] = st.text_input(
+                    f"Field {i+1} Label", value=field["label"], key=f"new_field_label_{i}"
+                )
             with c2:
                 st.session_state["new_category_fields"][i]["type"] = st.selectbox(
-                    f"Field {i+1} Type", ["text", "number", "date"],
-                    index=["text", "number", "date"].index(field["type"]), key=f"new_field_type_{i}"
+                    f"Field {i+1} Type",
+                    ["text", "number", "date"],
+                    index=["text", "number", "date"].index(field["type"]),
+                    key=f"new_field_type_{i}",
                 )
             with c3:
                 if st.button("❌", key=f"remove_field_{i}"):
@@ -4000,9 +4035,19 @@ elif page == "Expenses":
         # Build multiselect options
         tdf = get_trucks()
         def _tlabel(row):
-            return f"{str(row.get('number') or '').strip()} (ID:{row.get('truck_id')})"
-        all_labels = [] if tdf.empty else [_tlabel(r) for _, r in tdf.iterrows()]
-        label_to_id = { _tlabel(r): r["truck_id"] for _, r in tdf.iterrows() } if not tdf.empty else {}
+            if isinstance(row, dict):
+                return f"{str(row.get('number') or '').strip()} (ID:{row.get('truck_id')})"
+            else:
+                return f"{str(row.get('number') or '').strip()} (ID:{row.get('truck_id')})"
+        
+        all_labels = []
+        label_to_id = {}
+        if isinstance(tdf, list):
+            all_labels = [_tlabel(r) for r in tdf]
+            label_to_id = {_tlabel(r): r["truck_id"] for r in tdf}
+        elif not tdf.empty:
+            all_labels = [_tlabel(r) for _, r in tdf.iterrows()]
+            label_to_id = {_tlabel(r): r["truck_id"] for _, r in tdf.iterrows()}
 
         with st.form(key=f"add_expense_form_{cat_name}"):
             ad_date = st.date_input("Date", value=date.today())
@@ -4013,7 +4058,11 @@ elif page == "Expenses":
             if cat_name == "Fuel":
                 ad_gallons = st.number_input("Gallons", min_value=0.0, value=0.0, step=0.1)
             
-            ad_apply = st.selectbox("Apply mode", ["individual", "divide", "exclude"], index=["individual", "divide", "exclude"].index(cat.get("default_apply_mode", "individual")))
+            ad_apply = st.selectbox(
+                "Apply mode",
+                ["individual", "divide", "exclude"],
+                index=["individual", "divide", "exclude"].index(cat.get("default_apply_mode", "individual")),
+            )
 
             # Divide state keys
             sess_key_all = f"divide_all_trucks__{cat_name}"
@@ -4034,7 +4083,7 @@ elif page == "Expenses":
                 selected_labels_now = st.multiselect(
                     "Select trucks (ignored if All is checked)",
                     options=all_labels,
-                    default=st.session_state[sess_key_sel]
+                    default=st.session_state[sess_key_sel],
                 )
                 if selected_labels_now != st.session_state[sess_key_sel]:
                     st.session_state[sess_key_sel] = selected_labels_now
@@ -4045,7 +4094,9 @@ elif page == "Expenses":
             # Category fields -> metadata
             meta = {}
             for f in cat.get("schema", []):
-                t = f.get("type", "text"); lab = f.get("label", ""); key = f.get("key") or lab.lower().replace(" ", "_")
+                t = f.get("type", "text")
+                lab = f.get("label", "")
+                key = f.get("key") or lab.lower().replace(" ", "_")
                 if t == "number":
                     meta[key] = st.number_input(lab, value=0.0, step=0.01, key=f"add_{cat_name}_{key}")
                 elif t == "date":
@@ -4054,13 +4105,14 @@ elif page == "Expenses":
                     meta[key] = st.text_input(lab, value="", key=f"add_{cat_name}_{key}")
 
             # Attachments
-            uploaded_files = st.file_uploader("Attachments (optional)", accept_multiple_files=True, key=f"add_attachments_{cat_name}")
+            uploaded_files = st.file_uploader(
+                "Attachments (optional)", accept_multiple_files=True, key=f"add_attachments_{cat_name}"
+            )
 
             submitted = st.form_submit_button("Add Expense")
             if submitted:
                 try:
-                    conn_a = get_db_connection()
-                    cur = conn_a.cursor()
+                    from sqlalchemy import text
 
                     attachments = []
                     if uploaded_files:
@@ -4069,44 +4121,80 @@ elif page == "Expenses":
                             if att:
                                 attachments.append(att)
 
-                    if ad_apply == "divide":
-                        divide_all = st.session_state[sess_key_all]
-                        chosen_labels = st.session_state[sess_key_sel]
-                        if divide_all:
-                            target_ids = list(tdf["truck_id"].values) if not tdf.empty else []
+                    raw_conn_a = get_raw_db_connection()
+                    try:
+                        if ad_apply == "divide":
+                            divide_all = st.session_state[sess_key_all]
+                            chosen_labels = st.session_state[sess_key_sel]
+                            if divide_all:
+                                if isinstance(tdf, list):
+                                    target_ids = [t["truck_id"] for t in tdf]
+                                else:
+                                    target_ids = list(tdf["truck_id"].values) if not tdf.empty else []
+                            else:
+                                target_ids = [label_to_id.get(lbl) for lbl in chosen_labels]
+                            target_ids = [int(t) for t in target_ids if t is not None]
+                            uniq = sorted(set(target_ids))
+                            if not uniq:
+                                st.error("Please select at least one truck (or choose All trucks).")
+                                st.stop()
+
+                            per = round(ad_amount / len(uniq), 2)
+                            amounts = [per] * len(uniq)
+                            diff = round(ad_amount - sum(amounts), 2)
+                            if diff != 0 and amounts:
+                                amounts[-1] = round(amounts[-1] + diff, 2)
+
+                            # Divide gallons too if Fuel
+                            gallons_per = None
+                            if cat_name == "Fuel" and ad_gallons:
+                                gallons_per = round(ad_gallons / len(uniq), 2)
+
+                            for i, tid in enumerate(uniq):
+                                raw_conn_a.execute(
+                                    text(
+                                        """
+                                        INSERT INTO expenses (date, category, amount, truck_id, description, metadata, apply_mode, attachments, gallons)
+                                        VALUES (:dt, :cat, :amt, :tid, :desc, :meta, :apply, :att, :gal)
+                                        """
+                                    ),
+                                    {
+                                        "dt": ad_date,
+                                        "cat": cat_name,
+                                        "amt": amounts[i],
+                                        "tid": tid,
+                                        "desc": "",
+                                        "meta": json.dumps(meta),
+                                        "apply": "divide",
+                                        "att": json.dumps(attachments),
+                                        "gal": gallons_per,
+                                    },
+                                )
                         else:
-                            target_ids = [label_to_id.get(lbl) for lbl in chosen_labels]
-                        target_ids = [int(t) for t in target_ids if t is not None]
-                        uniq = sorted(set(target_ids))
-                        if not uniq:
-                            conn_a.close()
-                            st.error("Please select at least one truck (or choose All trucks).")
-                            st.stop()
+                            raw_conn_a.execute(
+                                text(
+                                    """
+                                    INSERT INTO expenses (date, category, amount, truck_id, description, metadata, apply_mode, attachments, gallons)
+                                    VALUES (:dt, :cat, :amt, :tid, :desc, :meta, :apply, :att, :gal)
+                                    """
+                                ),
+                                {
+                                    "dt": ad_date,
+                                    "cat": cat_name,
+                                    "amt": ad_amount,
+                                    "tid": selected_truck_id,
+                                    "desc": "",
+                                    "meta": json.dumps(meta),
+                                    "apply": ad_apply,
+                                    "att": json.dumps(attachments),
+                                    "gal": ad_gallons,
+                                },
+                            )
 
-                        per = round(ad_amount / len(uniq), 2)
-                        amounts = [per] * len(uniq)
-                        diff = round(ad_amount - sum(amounts), 2)
-                        if diff != 0 and amounts:
-                            amounts[-1] = round(amounts[-1] + diff, 2)
+                        raw_conn_a.commit()
+                    finally:
+                        raw_conn_a.close()
 
-                        # Divide gallons too if Fuel
-                        gallons_per = None
-                        if cat_name == "Fuel" and ad_gallons:
-                            gallons_per = round(ad_gallons / len(uniq), 2)
-
-                        for i, tid in enumerate(uniq):
-                            cur.execute("""
-                                INSERT INTO expenses (date, category, amount, truck_id, description, metadata, apply_mode, attachments, gallons)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """, (ad_date, cat_name, amounts[i], tid, "", json.dumps(meta), "divide", json.dumps(attachments), gallons_per))
-                    else:
-                        cur.execute("""
-                            INSERT INTO expenses (date, category, amount, truck_id, description, metadata, apply_mode, attachments, gallons)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (ad_date, cat_name, ad_amount, selected_truck_id, "", json.dumps(meta), ad_apply, json.dumps(attachments), ad_gallons))
-
-                    conn_a.commit()
-                    conn_a.close()
                     st.success("Expense added.")
                     # reset state
                     st.session_state.pop(sess_key_all, None)
@@ -4136,37 +4224,47 @@ elif page == "Expenses":
                         st.write(f"- {f.get('label')} ({f.get('type')})")
                 else:
                     st.write("No custom fields.")
-                
+
                 # Edit category
                 with st.form(key=f"edit_cat_{cat['name']}"):
                     st.markdown("#### Edit Category")
-                    new_name = st.text_input("Category name", value=cat['name'])
-                    new_apply = st.selectbox("Default apply mode", ["individual", "divide", "exclude"], 
-                                            index=["individual", "divide", "exclude"].index(cat.get('default_apply_mode', 'individual')))
-                    
+                    new_name = st.text_input("Category name", value=cat["name"])
+                    new_apply = st.selectbox(
+                        "Default apply mode",
+                        ["individual", "divide", "exclude"],
+                        index=["individual", "divide", "exclude"].index(
+                            cat.get("default_apply_mode", "individual")
+                        ),
+                    )
+
                     # Edit fields
                     if f"edit_fields_{cat['name']}" not in st.session_state:
                         st.session_state[f"edit_fields_{cat['name']}"] = cat.get("schema", []).copy()
-                    
+
                     for i, field in enumerate(st.session_state[f"edit_fields_{cat['name']}"]):
                         c1, c2, c3 = st.columns([3, 2, 0.6])
                         with c1:
                             st.session_state[f"edit_fields_{cat['name']}"][i]["label"] = st.text_input(
-                                f"Field {i+1} Label", value=field.get("label", ""), key=f"edit_{cat['name']}_field_label_{i}")
+                                f"Field {i+1} Label",
+                                value=field.get("label", ""),
+                                key=f"edit_{cat['name']}_field_label_{i}",
+                            )
                         with c2:
                             st.session_state[f"edit_fields_{cat['name']}"][i]["type"] = st.selectbox(
-                                f"Field {i+1} Type", ["text", "number", "date"],
-                                index=["text", "number", "date"].index(field.get("type", "text")), 
-                                key=f"edit_{cat['name']}_field_type_{i}")
+                                f"Field {i+1} Type",
+                                ["text", "number", "date"],
+                                index=["text", "number", "date"].index(field.get("type", "text")),
+                                key=f"edit_{cat['name']}_field_type_{i}",
+                            )
                         with c3:
                             if st.form_submit_button("❌", help=f"Remove field {i+1}"):
                                 st.session_state[f"edit_fields_{cat['name']}"].pop(i)
                                 safe_rerun()
-                    
+
                     if st.form_submit_button("➕ Add Field"):
                         st.session_state[f"edit_fields_{cat['name']}"].append({"label": "", "type": "text"})
                         safe_rerun()
-                    
+
                     if st.form_submit_button("Save Changes"):
                         parsed = []
                         for f in st.session_state[f"edit_fields_{cat['name']}"]:
@@ -4181,15 +4279,20 @@ elif page == "Expenses":
                             safe_rerun()
                         except Exception as e:
                             st.error(f"Could not update category: {e}")
-                
+
                 # Delete category
                 if st.button(f"🗑️ Delete '{cat['name']}'", key=f"delete_cat_{cat['name']}"):
                     try:
-                        conn_d = get_db_connection()
-                        cur = conn_d.cursor()
-                        cur.execute("DELETE FROM expense_categories WHERE name = ?", (cat['name'],))
-                        conn_d.commit()
-                        conn_d.close()
+                        from sqlalchemy import text
+
+                        raw_conn_d = get_raw_db_connection()
+                        try:
+                            raw_conn_d.execute(
+                                text("DELETE FROM expense_categories WHERE name = :name"), {"name": cat["name"]}
+                            )
+                            raw_conn_d.commit()
+                        finally:
+                            raw_conn_d.close()
                         st.success(f"Category '{cat['name']}' deleted.")
                         safe_rerun()
                     except Exception as e:
@@ -4201,18 +4304,18 @@ elif page == "Expenses":
         st.markdown(f"### {current_tab}")
 
         # Build query
-        query = "SELECT * FROM expenses WHERE date BETWEEN ? AND ?"
-        params = [start_date, end_date]
         if filter_cat:
-            query += " AND category = ?"
-            params.append(filter_cat)
-        query += " ORDER BY date DESC"
+            query = "SELECT * FROM expenses WHERE date BETWEEN %s AND %s AND category = %s ORDER BY date DESC"
+            params = (start_date, end_date, filter_cat)
+        else:
+            query = "SELECT * FROM expenses WHERE date BETWEEN %s AND %s ORDER BY date DESC"
+            params = (start_date, end_date)
 
-        conn_v = get_db_connection()
+        raw_conn_v = get_raw_db_connection()
         try:
-            df_expenses = pd.read_sql_query(query, conn_v, params=params)
+            df_expenses = pd.read_sql_query(query, raw_conn_v, params=params)
         finally:
-            conn_v.close()
+            raw_conn_v.close()
 
         if df_expenses.empty:
             st.info("No expenses found for this filter.")
@@ -4233,27 +4336,27 @@ elif page == "Expenses":
 
             # Display table
             st.markdown(f"**Showing {start_idx+1}-{min(end_idx, total_rows)} of {total_rows} expenses**")
-            
+
             # Build display dataframe
             display_data = []
             for _, row in df_page.iterrows():
                 truck_label = "[None]"
                 if pd.notna(row.get("truck_id")):
                     truck_label = truck_id_reverse_map.get(int(row["truck_id"]), f"ID:{int(row['truck_id'])}")
-                
+
                 meta = {}
                 try:
                     meta = json.loads(row.get("metadata") or "{}")
                 except:
                     pass
-                
+
                 # Get category schema
                 cat_schema = []
                 if row.get("category"):
                     cat_obj = category_by_name.get(row["category"])
                     if cat_obj:
                         cat_schema = cat_obj.get("schema", [])
-                
+
                 # Build metadata display
                 meta_display = []
                 for f in cat_schema:
@@ -4261,14 +4364,14 @@ elif page == "Expenses":
                     label = f.get("label")
                     if key in meta:
                         meta_display.append(f"{label}: {meta[key]}")
-                
+
                 # Attachments count
                 attachments = []
                 try:
                     attachments = json.loads(row.get("attachments") or "[]")
                 except:
                     pass
-                
+
                 display_row = {
                     "ID": row["expense_id"],
                     "Date": row["date"],
@@ -4277,17 +4380,17 @@ elif page == "Expenses":
                     "Truck": truck_label,
                     "Apply Mode": row.get("apply_mode", "individual"),
                     "Details": " | ".join(meta_display) if meta_display else "-",
-                    "Attachments": len(attachments)
+                    "Attachments": len(attachments),
                 }
-                
+
                 # Add gallons if Fuel category
                 if row.get("category") == "Fuel" and pd.notna(row.get("gallons")):
                     display_row["Gallons"] = f"{row['gallons']:.2f}"
-                
+
                 display_data.append(display_row)
-            
+
             df_display = pd.DataFrame(display_data)
-            st.dataframe(df_display, use_container_width=True)
+            st.dataframe(df_display, width='stretch')
 
             # Pagination controls
             col1, col2, col3, col4, col5 = st.columns([1, 1, 2, 1, 1])
@@ -4300,7 +4403,10 @@ elif page == "Expenses":
                     st.session_state["expenses_page"] = current_page - 1
                     safe_rerun()
             with col3:
-                st.markdown(f"<div style='text-align: center; padding-top: 8px;'>Page {current_page} of {total_pages}</div>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<div style='text-align: center; padding-top: 8px;'>Page {current_page} of {total_pages}</div>",
+                    unsafe_allow_html=True,
+                )
             with col4:
                 if st.button("Next ▶️", disabled=(current_page == total_pages)):
                     st.session_state["expenses_page"] = current_page + 1
@@ -4314,7 +4420,7 @@ elif page == "Expenses":
             st.markdown("---")
             st.markdown("#### Bulk Operations")
             bulk_col1, bulk_col2 = st.columns(2)
-            
+
             with bulk_col1:
                 st.markdown("##### Export")
                 export_format = st.selectbox("Format", ["CSV", "Excel"], key="export_format_expenses")
@@ -4322,17 +4428,25 @@ elif page == "Expenses":
                     try:
                         if export_format == "CSV":
                             csv = df_expenses.to_csv(index=False)
-                            st.download_button("Download CSV", csv, f"expenses_{current_tab}_{start_date}_{end_date}.csv", "text/csv")
+                            st.download_button(
+                                "Download CSV",
+                                csv,
+                                f"expenses_{current_tab}_{start_date}_{end_date}.csv",
+                                "text/csv",
+                            )
                         else:
                             output = io.BytesIO()
-                            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                                df_expenses.to_excel(writer, index=False, sheet_name='Expenses')
-                            st.download_button("Download Excel", output.getvalue(), 
-                                             f"expenses_{current_tab}_{start_date}_{end_date}.xlsx", 
-                                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                                df_expenses.to_excel(writer, index=False, sheet_name="Expenses")
+                            st.download_button(
+                                "Download Excel",
+                                output.getvalue(),
+                                f"expenses_{current_tab}_{start_date}_{end_date}.xlsx",
+                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            )
                     except Exception as e:
                         st.error(f"Export failed: {e}")
-            
+
             with bulk_col2:
                 st.markdown("##### Delete")
                 delete_ids = st.text_input("Enter expense IDs to delete (comma-separated)", key="bulk_delete_ids")
@@ -4341,12 +4455,19 @@ elif page == "Expenses":
                         try:
                             ids = [int(x.strip()) for x in delete_ids.split(",") if x.strip().isdigit()]
                             if ids:
-                                conn_del = get_db_connection()
-                                cur = conn_del.cursor()
-                                placeholders = ",".join(["?"] * len(ids))
-                                cur.execute(f"DELETE FROM expenses WHERE expense_id IN ({placeholders})", ids)
-                                conn_del.commit()
-                                conn_del.close()
+                                from sqlalchemy import text
+
+                                raw_conn_del = get_raw_db_connection()
+                                try:
+                                    placeholders = ",".join([f":id{i}" for i in range(len(ids))])
+                                    params_dict = {f"id{i}": ids[i] for i in range(len(ids))}
+                                    raw_conn_del.execute(
+                                        text(f"DELETE FROM expenses WHERE expense_id IN ({placeholders})"),
+                                        params_dict,
+                                    )
+                                    raw_conn_del.commit()
+                                finally:
+                                    raw_conn_del.close()
                                 st.success(f"Deleted {len(ids)} expense(s).")
                                 safe_rerun()
                             else:
@@ -4364,11 +4485,13 @@ elif page == "Expenses":
 
             if st.session_state.get("editing_expense_id"):
                 eid = st.session_state["editing_expense_id"]
-                conn_e = get_db_connection()
+                raw_conn_e = get_raw_db_connection()
                 try:
-                    df_edit = pd.read_sql_query("SELECT * FROM expenses WHERE expense_id = ?", conn_e, params=(eid,))
+                    df_edit = pd.read_sql_query(
+                        "SELECT * FROM expenses WHERE expense_id = %s", raw_conn_e, params=(eid,)
+                    )
                 finally:
-                    conn_e.close()
+                    raw_conn_e.close()
 
                 if df_edit.empty:
                     st.error(f"Expense ID {eid} not found.")
@@ -4379,10 +4502,17 @@ elif page == "Expenses":
 
                     with st.form(key=f"edit_expense_form_{eid}"):
                         ed_date = st.date_input("Date", value=pd.to_datetime(row["date"]).date())
-                        ed_category = st.selectbox("Category", category_names, 
-                                                   index=category_names.index(row["category"]) if row["category"] in category_names else 0)
+                        ed_category = st.selectbox(
+                            "Category",
+                            category_names,
+                            index=(
+                                category_names.index(row["category"])
+                                if row["category"] in category_names
+                                else 0
+                            ),
+                        )
                         ed_amount = st.number_input("Amount", value=float(row["amount"]), step=0.01)
-                        
+
                         # ===== EDIT GALLONS FOR FUEL =====
                         ed_gallons = None
                         if ed_category == "Fuel":
@@ -4390,20 +4520,32 @@ elif page == "Expenses":
                             if pd.isna(current_gallons):
                                 current_gallons = 0.0
                             ed_gallons = st.number_input("Gallons", value=float(current_gallons), step=0.1)
-                        
+
                         # Truck selection
                         current_truck_id = row.get("truck_id")
                         if pd.isna(current_truck_id):
                             current_truck_label = "[None]"
                         else:
                             current_truck_label = truck_id_reverse_map.get(int(current_truck_id), "[None]")
-                        
-                        ed_truck_label = st.selectbox("Truck", truck_display, 
-                                                     index=truck_display.index(current_truck_label) if current_truck_label in truck_display else 0)
+
+                        ed_truck_label = st.selectbox(
+                            "Truck",
+                            truck_display,
+                            index=(
+                                truck_display.index(current_truck_label)
+                                if current_truck_label in truck_display
+                                else 0
+                            ),
+                        )
                         ed_truck_id = None if ed_truck_label == "[None]" else truck_id_map.get(ed_truck_label)
-                        
-                        ed_apply = st.selectbox("Apply mode", ["individual", "divide", "exclude"],
-                                               index=["individual", "divide", "exclude"].index(row.get("apply_mode", "individual")))
+
+                        ed_apply = st.selectbox(
+                            "Apply mode",
+                            ["individual", "divide", "exclude"],
+                            index=["individual", "divide", "exclude"].index(
+                                row.get("apply_mode", "individual")
+                            ),
+                        )
 
                         # Metadata
                         cat_obj = category_by_name.get(ed_category)
@@ -4412,7 +4554,7 @@ elif page == "Expenses":
                             current_meta = json.loads(row.get("metadata") or "{}")
                         except:
                             pass
-                        
+
                         new_meta = {}
                         if cat_obj:
                             for f in cat_obj.get("schema", []):
@@ -4420,18 +4562,28 @@ elif page == "Expenses":
                                 lab = f.get("label", "")
                                 key = f.get("key") or lab.lower().replace(" ", "_")
                                 current_val = current_meta.get(key, "")
-                                
+
                                 if t == "number":
-                                    new_meta[key] = st.number_input(lab, value=float(current_val) if current_val else 0.0, 
-                                                                   step=0.01, key=f"edit_{eid}_{key}")
+                                    new_meta[key] = st.number_input(
+                                        lab,
+                                        value=float(current_val) if current_val else 0.0,
+                                        step=0.01,
+                                        key=f"edit_{eid}_{key}",
+                                    )
                                 elif t == "date":
                                     try:
-                                        date_val = pd.to_datetime(current_val).date() if current_val else date.today()
+                                        date_val = (
+                                            pd.to_datetime(current_val).date() if current_val else date.today()
+                                        )
                                     except:
                                         date_val = date.today()
-                                    new_meta[key] = str(st.date_input(lab, value=date_val, key=f"edit_{eid}_{key}"))
+                                    new_meta[key] = str(
+                                        st.date_input(lab, value=date_val, key=f"edit_{eid}_{key}")
+                                    )
                                 else:
-                                    new_meta[key] = st.text_input(lab, value=str(current_val), key=f"edit_{eid}_{key}")
+                                    new_meta[key] = st.text_input(
+                                        lab, value=str(current_val), key=f"edit_{eid}_{key}"
+                                    )
 
                         # Attachments
                         current_attachments = []
@@ -4439,13 +4591,15 @@ elif page == "Expenses":
                             current_attachments = json.loads(row.get("attachments") or "[]")
                         except:
                             pass
-                        
+
                         if current_attachments:
                             st.markdown("**Current Attachments:**")
                             for i, att in enumerate(current_attachments):
                                 st.write(f"{i+1}. {att.get('filename', 'Unknown')}")
-                        
-                        new_files = st.file_uploader("Add new attachments", accept_multiple_files=True, key=f"edit_attachments_{eid}")
+
+                        new_files = st.file_uploader(
+                            "Add new attachments", accept_multiple_files=True, key=f"edit_attachments_{eid}"
+                        )
 
                         submitted = st.form_submit_button("Save Changes")
                         if submitted:
@@ -4458,18 +4612,35 @@ elif page == "Expenses":
                                         if att:
                                             all_attachments.append(att)
 
-                                conn_u = get_db_connection()
-                                cur = conn_u.cursor()
-                                cur.execute("""
-                                    UPDATE expenses 
-                                    SET date = ?, category = ?, amount = ?, truck_id = ?, 
-                                        metadata = ?, apply_mode = ?, attachments = ?, gallons = ?
-                                    WHERE expense_id = ?
-                                """, (ed_date, ed_category, ed_amount, ed_truck_id, 
-                                     json.dumps(new_meta), ed_apply, json.dumps(all_attachments), ed_gallons, eid))
-                                conn_u.commit()
-                                conn_u.close()
-                                
+                                from sqlalchemy import text
+
+                                raw_conn_u = get_raw_db_connection()
+                                try:
+                                    raw_conn_u.execute(
+                                        text(
+                                            """
+                                            UPDATE expenses
+                                            SET date = :dt, category = :cat, amount = :amt, truck_id = :tid,
+                                                metadata = :meta, apply_mode = :apply, attachments = :att, gallons = :gal
+                                            WHERE expense_id = :eid
+                                            """
+                                        ),
+                                        {
+                                            "dt": ed_date,
+                                            "cat": ed_category,
+                                            "amt": ed_amount,
+                                            "tid": ed_truck_id,
+                                            "meta": json.dumps(new_meta),
+                                            "apply": ed_apply,
+                                            "att": json.dumps(all_attachments),
+                                            "gal": ed_gallons,
+                                            "eid": eid,
+                                        },
+                                    )
+                                    raw_conn_u.commit()
+                                finally:
+                                    raw_conn_u.close()
+
                                 st.success(f"Expense #{eid} updated.")
                                 st.session_state.pop("editing_expense_id", None)
                                 safe_rerun()
@@ -4479,7 +4650,6 @@ elif page == "Expenses":
                     if st.button("Cancel Edit"):
                         st.session_state.pop("editing_expense_id", None)
                         safe_rerun()
-
 # -------------------------
 # Income Management
 # -------------------------
