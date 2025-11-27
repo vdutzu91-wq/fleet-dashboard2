@@ -3020,13 +3020,25 @@ elif page == "Trucks":
                 "Loan Amount (monthly)", min_value=0.0, value=0.0
             )
 
-            # driver selection
-            drivers_df = get_drivers()
-            driver_options = ["No Driver Assigned"] + [
-                f"{r['name']} ({r['license_number'] or ''})"
-                for _, r in drivers_df.iterrows()
-            ]
-            driver_ids = [None] + drivers_df["driver_id"].tolist()
+            # driver selection (supports DataFrame or list[dict])
+            drivers = get_drivers()
+            driver_options = ["No Driver Assigned"]
+            driver_ids = [None]
+
+            if isinstance(drivers, list):
+                for d in drivers:
+                    driver_options.append(
+                        f"{d.get('name','')} ({d.get('license_number') or ''})"
+                    )
+                    driver_ids.append(d.get("driver_id"))
+            else:
+                # assume DataFrame
+                for _, r in drivers.iterrows():
+                    driver_options.append(
+                        f"{r['name']} ({r.get('license_number') or ''})"
+                    )
+                    driver_ids.append(r["driver_id"])
+
             selected_driver_idx = st.selectbox(
                 "Assigned Driver",
                 range(len(driver_options)),
@@ -3034,7 +3046,7 @@ elif page == "Trucks":
             )
             driver_id = driver_ids[selected_driver_idx]
 
-            # dispatcher selection (list[dict])
+            # dispatcher selection (list[dict] from get_all_dispatchers)
             dispatchers = get_all_dispatchers()
             dispatcher_options = ["No Dispatcher Assigned"]
             dispatcher_ids = [None]
@@ -3055,36 +3067,69 @@ elif page == "Trucks":
                     st.error("Truck number is required.")
                 else:
                     try:
-                        conn = get_db_connection()
-                        cur = conn.cursor()
-                        # Insert truck, return its id (Postgres style)
-                        cur.execute(
-                            """
-                            INSERT INTO trucks (number, make, model, year, plate, vin, status, loan_amount, driver_id, dispatcher_id)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                            RETURNING truck_id
-                            """,
-                            (
-                                number,
-                                make,
-                                model,
-                                year,
-                                plate,
-                                vin,
-                                status,
-                                loan_amount,
-                                driver_id,
-                                dispatcher_id,
-                            ),
-                        )
-                        truck_id_row = cur.fetchone()
-                        truck_id = truck_id_row[0] if truck_id_row else None
-                        conn.commit()
-                        conn.close()
+                        # Helper to normalize to int/None
+                        def to_int_or_none(v):
+                            if isinstance(v, dict):
+                                for k in ("driver_id", "dispatcher_id", "id"):
+                                    if k in v:
+                                        v = v[k]
+                                        break
+                            if isinstance(v, (list, tuple)):
+                                for x in v:
+                                    if not isinstance(x, (dict, list)):
+                                        v = x
+                                        break
+                            try:
+                                return int(v) if v is not None and v != "" else None
+                            except Exception:
+                                return None
 
+                        norm_driver_id = to_int_or_none(driver_id)
+                        norm_dispatcher_id = to_int_or_none(dispatcher_id)
+
+                        from sqlalchemy import text
+                        raw_conn = get_raw_db_connection()
+                        try:
+                            # Insert truck and get new id using SQLAlchemy text()
+                            insert_params = {
+                                "number": number,
+                                "make": make,
+                                "model": model,
+                                "year": int(year) if year is not None else None,
+                                "plate": plate,
+                                "vin": vin,
+                                "status": status,
+                                "loan_amount": float(loan_amount or 0.0),
+                                "driver_id": norm_driver_id,
+                                "dispatcher_id": norm_dispatcher_id,
+                            }
+
+                            result = raw_conn.execute(
+                                text(
+                                    """
+                                    INSERT INTO trucks (
+                                        number, make, model, year, plate, vin, status,
+                                        loan_amount, driver_id, dispatcher_id
+                                    )
+                                    VALUES (
+                                        :number, :make, :model, :year, :plate, :vin, :status,
+                                        :loan_amount, :driver_id, :dispatcher_id
+                                    )
+                                    RETURNING truck_id
+                                    """
+                                ),
+                                insert_params,
+                            )
+                            row = result.fetchone()
+                            truck_id = row[0] if row else None
+                            raw_conn.commit()
+                        finally:
+                            raw_conn.close()
+
+                        # Loan history
                         if truck_id and loan_amount and loan_amount > 0:
                             try:
-                                upsert_current_loan(
+                               upsert_current_loan(
                                     "truck",
                                     int(truck_id),
                                     float(loan_amount),
@@ -3092,13 +3137,12 @@ elif page == "Trucks":
                                     None,
                                 )
                             except Exception as e:
-                                st.warning(
-                                    f"Initial loan history warning: {e}"
-                                )
+                                st.warning(f"Initial loan history warning: {e}")
 
-                        if truck_id and driver_id:
-                            record_driver_assignment(
-                                driver_id,
+                        # Driver assignment history
+                        if truck_id and norm_driver_id:
+                                record_driver_assignment(
+                                norm_driver_id,
                                 truck_id=truck_id,
                                 start_date=date.today(),
                                 note="Assigned on create",
@@ -3107,7 +3151,6 @@ elif page == "Trucks":
                         st.success("Truck added successfully!")
                         safe_rerun()
                     except Exception as e:
-                        # Most likely unique number violation, but show message
                         st.error(f"Failed to add truck (maybe number exists?): {e}")
 
 # -------------------------
