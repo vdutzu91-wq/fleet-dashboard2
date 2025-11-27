@@ -1834,81 +1834,138 @@ def prorated_monthly_amount_for_range(monthly_amount: float, start_date: date, e
 # Loan-history helpers
 # -------------------------
 def get_loan_history(entity_type: str, entity_id: int):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT id, monthly_amount, start_date, end_date, note
-        FROM loans_history
-        WHERE entity_type=? AND entity_id=?
-        ORDER BY DATE(start_date) ASC
-    """, (entity_type, entity_id))
-    rows = cur.fetchall()
-    conn.close()
-    result = []
-    for r in rows:
-        sid = r[2]
-        eid = r[3]
-        result.append({
-            'id': r[0],
-            'monthly_amount': float(r[1]),
-            'start_date': to_date(r[2]) if r[2] else None,
-            'end_date': to_date(r[3]) if r[3] else None,
-            'note': r[4]
-        })
-    return result
+    from sqlalchemy import text
 
-def set_loan_history(entity_type: str, entity_id: int, monthly_amount: float, start_date: date=None, note: str=None):
+    raw_conn = get_raw_db_connection()
+    try:
+        result = raw_conn.execute(
+            text(
+                """
+                SELECT id, monthly_amount, start_date, end_date, note
+                FROM loans_history
+                WHERE entity_type = :etype AND entity_id = :eid
+                ORDER BY start_date ASC
+                """
+            ),
+            {"etype": entity_type, "eid": entity_id},
+        )
+        rows = result.fetchall()
+        return [
+            {
+                "id": r[0],
+                "monthly_amount": float(r[1]),
+                "start_date": r[2] if r[2] else None,  # already date object
+                "end_date": r[3] if r[3] else None,
+                "note": r[4],
+            }
+            for r in rows
+        ]
+    finally:
+        raw_conn.close()
+
+def set_loan_history(
+    entity_type: str,
+    entity_id: int,
+    monthly_amount: float,
+    start_date: date = None,
+    note: str = None,
+):
     if start_date is None:
         start_date = date.today()
-    conn = get_db_connection()
-    cur = conn.cursor()
-    # close previous open record
-    cur.execute("""
-        SELECT id, start_date FROM loans_history
-        WHERE entity_type=? AND entity_id=? AND end_date IS NULL
-        ORDER BY DATE(start_date) DESC LIMIT 1
-    """, (entity_type, entity_id))
-    prev = cur.fetchone()
-    if prev:
-        prev_id = prev[0]
-        prev_end = start_date - timedelta(days=1)
-        cur.execute("UPDATE loans_history SET end_date=? WHERE id=?", (prev_end, prev_id))
-    # insert new
-    cur.execute("""
-        INSERT INTO loans_history (entity_type, entity_id, monthly_amount, start_date, note)
-        VALUES (?, ?, ?, ?, ?)
-    """, (entity_type, entity_id, monthly_amount, start_date, note))
-    conn.commit()
-    conn.close()
 
-def get_prorated_loan_for_entity(entity_type: str, entity_id: int, range_start: date, range_end: date) -> float:
+    from sqlalchemy import text
+
+    raw_conn = get_raw_db_connection()
+    try:
+        # Close previous open record
+        result = raw_conn.execute(
+            text(
+                """
+                SELECT id, start_date
+                FROM loans_history
+                WHERE entity_type = :etype AND entity_id = :eid AND end_date IS NULL
+                ORDER BY start_date DESC
+                LIMIT 1
+                """
+            ),
+            {"etype": entity_type, "eid": entity_id},
+        )
+        prev = result.fetchone()
+        if prev:
+            prev_id = prev[0]
+            prev_end = start_date - timedelta(days=1)
+            raw_conn.execute(
+                text("UPDATE loans_history SET end_date = :ed WHERE id = :lid"),
+                {"ed": prev_end, "lid": prev_id},
+            )
+
+        # Insert new
+        raw_conn.execute(
+            text(
+                """
+                INSERT INTO loans_history (entity_type, entity_id, monthly_amount, start_date, note)
+                VALUES (:etype, :eid, :amt, :sd, :note)
+                """
+            ),
+            {
+                "etype": entity_type,
+                "eid": entity_id,
+                "amt": monthly_amount,
+                "sd": start_date,
+                "note": note,
+            },
+        )
+        raw_conn.commit()
+    finally:
+        raw_conn.close()
+
+def get_prorated_loan_for_entity(
+    entity_type: str, entity_id: int, range_start: date, range_end: date
+) -> float:
     rows = get_loan_history(entity_type, entity_id)
     total = 0.0
     if not rows:
-        # fallback: read current loan_amount from table
-        conn = get_db_connection()
-        cur = conn.cursor()
-        if entity_type == 'truck':
-            cur.execute("SELECT loan_amount FROM trucks WHERE truck_id=?", (entity_id,))
-        else:
-            cur.execute("SELECT loan_amount FROM trailers WHERE trailer_id=?", (entity_id,))
-        r = cur.fetchone()
-        conn.close()
-        monthly = float(r[0]) if r and r[0] is not None else 0.0
-        return prorated_monthly_amount_for_range(monthly, range_start, range_end)
+        # Fallback: read current loan_amount from table
+        from sqlalchemy import text
+
+        raw_conn = get_raw_db_connection()
+        try:
+            if entity_type == "truck":
+                result = raw_conn.execute(
+                    text("SELECT loan_amount FROM trucks WHERE truck_id = :eid"),
+                    {"eid": entity_id},
+                )
+            else:
+                result = raw_conn.execute(
+                    text("SELECT loan_amount FROM trailers WHERE trailer_id = :eid"),
+                    {"eid": entity_id},
+                )
+            r = result.fetchone()
+            monthly = float(r[0]) if r and r[0] is not None else 0.0
+            return prorated_monthly_amount_for_range(monthly, range_start, range_end)
+        finally:
+            raw_conn.close()
 
     for row in rows:
-        seg_start = max(range_start, row['start_date'])
-        seg_end = min(range_end, row['end_date'] or range_end)
+        seg_start = max(range_start, row["start_date"])
+        seg_end = min(range_end, row["end_date"] or range_end)
         if seg_start > seg_end:
             continue
-        total += prorated_monthly_amount_for_range(row['monthly_amount'], seg_start, seg_end)
+        total += prorated_monthly_amount_for_range(
+            row["monthly_amount"], seg_start, seg_end
+        )
     return total
 
-def upsert_current_loan(entity_type: str, entity_id: int, monthly_amount: float, start_date: date, end_date: date | None):
+def upsert_current_loan(
+    entity_type: str,
+    entity_id: int,
+    monthly_amount: float,
+    start_date: date,
+    end_date: date | None,
+):
     """
     Maintain loans_history without losing past data:
-    - If an open row exists (end_date NULL/empty):
+    - If an open row exists (end_date NULL):
         - If end_date provided: close the open row.
         - If amount==0 and no end_date: close open row today.
         - If start_date > existing start: close existing day before new start; insert new row from new start with new amount.
@@ -1917,83 +1974,115 @@ def upsert_current_loan(entity_type: str, entity_id: int, monthly_amount: float,
     - If no open row:
         - Insert a new row if amount > 0 (with optional end_date).
     """
-    conn = get_db_connection()
-    cur = conn.cursor()
+    from sqlalchemy import text
 
-    cur.execute("""
-        SELECT id, monthly_amount, DATE(start_date) AS s, end_date
-        FROM loans_history
-        WHERE entity_type = ? AND entity_id = ? AND (end_date IS NULL OR end_date = '')
-        ORDER BY DATE(start_date) ASC
-        LIMIT 1
-    """, (entity_type, entity_id))
-    row = cur.fetchone()
+    raw_conn = get_raw_db_connection()
+    try:
+        # Find open loan row (end_date IS NULL)
+        result = raw_conn.execute(
+            text(
+                """
+                SELECT id, monthly_amount, start_date, end_date
+                FROM loans_history
+                WHERE entity_type = :etype AND entity_id = :eid AND end_date IS NULL
+                ORDER BY start_date ASC
+                LIMIT 1
+                """
+            ),
+            {"etype": entity_type, "eid": entity_id},
+        )
+        row = result.fetchone()
 
-    new_amt = float(monthly_amount or 0.0)
-    new_s = start_date
-    new_e = end_date
+        new_amt = float(monthly_amount or 0.0)
+        new_s = start_date if start_date else date.today()
+        new_e = end_date
 
-    def ds(d):
-        return None if d is None else d.isoformat()
+        today_d = date.today()
 
-    today_d = date.today()
+        if row:
+            open_id, old_amt, old_s, old_e = row
+            # old_s is already a date object from SQLAlchemy
 
-    if row:
-        open_id, old_amt, old_s_str, old_e = row
-        old_s = date.fromisoformat(old_s_str)
+            if new_e:
+                # Close open loan at provided end_date
+                raw_conn.execute(
+                    text("UPDATE loans_history SET end_date = :ed WHERE id = :lid"),
+                    {"ed": new_e, "lid": open_id},
+                )
+                raw_conn.commit()
+                return
 
-        if new_e:
-            # Close open loan at provided end_date
-            cur.execute("UPDATE loans_history SET end_date = ? WHERE id = ?", (ds(new_e), open_id))
-            conn.commit()
-            conn.close()
+            if new_amt <= 0:
+                # End the open loan today
+                raw_conn.execute(
+                    text("UPDATE loans_history SET end_date = :ed WHERE id = :lid"),
+                    {"ed": today_d, "lid": open_id},
+                )
+                raw_conn.commit()
+                return
+
+            if new_s > old_s:
+                # Split: close existing day before new start, then add new row
+                end_prev = new_s - timedelta(days=1)
+                raw_conn.execute(
+                    text("UPDATE loans_history SET end_date = :ed WHERE id = :lid"),
+                    {"ed": end_prev, "lid": open_id},
+                )
+                raw_conn.execute(
+                    text(
+                        """
+                        INSERT INTO loans_history (entity_type, entity_id, monthly_amount, start_date, end_date)
+                        VALUES (:etype, :eid, :amt, :sd, NULL)
+                        """
+                    ),
+                    {"etype": entity_type, "eid": entity_id, "amt": new_amt, "sd": new_s},
+                )
+                raw_conn.commit()
+                return
+
+            if new_s == old_s:
+                if float(old_amt) != new_amt:
+                    raw_conn.execute(
+                        text(
+                            "UPDATE loans_history SET monthly_amount = :amt WHERE id = :lid"
+                        ),
+                        {"amt": new_amt, "lid": open_id},
+                    )
+                    raw_conn.commit()
+                return
+
+            # new_s < old_s
+            raw_conn.execute(
+                text(
+                    "UPDATE loans_history SET start_date = :sd, monthly_amount = :amt WHERE id = :lid"
+                ),
+                {"sd": new_s, "amt": new_amt, "lid": open_id},
+            )
+            raw_conn.commit()
             return
 
+        # No open row
         if new_amt <= 0:
-            # End the open loan today
-            cur.execute("UPDATE loans_history SET end_date = ? WHERE id = ?", (ds(today_d), open_id))
-            conn.commit()
-            conn.close()
             return
 
-        if new_s > old_s:
-            # Split: close existing day before new start, then add new row
-            end_prev = new_s - timedelta(days=1)
-            cur.execute("UPDATE loans_history SET end_date = ? WHERE id = ?", (ds(end_prev), open_id))
-            cur.execute("""
+        raw_conn.execute(
+            text(
+                """
                 INSERT INTO loans_history (entity_type, entity_id, monthly_amount, start_date, end_date)
-                VALUES (?, ?, ?, ?, NULL)
-            """, (entity_type, entity_id, new_amt, ds(new_s)))
-            conn.commit()
-            conn.close()
-            return
-
-        if new_s == old_s:
-            if float(old_amt) != new_amt:
-                cur.execute("UPDATE loans_history SET monthly_amount = ? WHERE id = ?", (new_amt, open_id))
-                conn.commit()
-                conn.close()
-            else:
-                conn.close()
-            return
-
-        # new_s < old_s
-        cur.execute("UPDATE loans_history SET start_date = ?, monthly_amount = ? WHERE id = ?", (ds(new_s), new_amt, open_id))
-        conn.commit()
-        conn.close()
-        return
-
-    # No open row
-    if new_amt <= 0:
-        conn.close()
-        return
-
-    cur.execute("""
-        INSERT INTO loans_history (entity_type, entity_id, monthly_amount, start_date, end_date)
-        VALUES (?, ?, ?, ?, ?)
-    """, (entity_type, entity_id, new_amt, ds(new_s), ds(new_e)))
-    conn.commit()
-    conn.close()
+                VALUES (:etype, :eid, :amt, :sd, :ed)
+                """
+            ),
+            {
+                "etype": entity_type,
+                "eid": entity_id,
+                "amt": new_amt,
+                "sd": new_s,
+                "ed": new_e,
+            },
+        )
+        raw_conn.commit()
+    finally:
+        raw_conn.close()
 
 # -------------------------
 # Assignment history helpers
