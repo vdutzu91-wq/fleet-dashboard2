@@ -2920,6 +2920,7 @@ elif page == "Trucks":
 
                                     st.write("DEBUG update_params_dict:", update_params_dict)
 
+                                    # Core truck UPDATE
                                     raw_conn.execute(
                                         text(
                                             """
@@ -2939,43 +2940,42 @@ elif page == "Trucks":
                                         ),
                                         update_params_dict,
                                     )
-                                    raw_conn.commit()
-                                finally:
-                                   raw_conn.close()
 
-                                # --- Trailer linkage: single trailer per truck, using wrapper connection ---
-                                tconn = get_db_connection()
-                                tcur = tconn.cursor()
-                                try:
+                                    # --- Trailer linkage: single trailer per truck, also via raw_conn ---
                                     if norm_trailer_id is None:
                                         # Unassign this truck from any trailers
-                                        tcur.execute(
-                                            "UPDATE trailers SET truck_id = NULL WHERE truck_id = %s",
-                                            (int(selected_truck),),
+                                        raw_conn.execute(
+                                            text("UPDATE trailers SET truck_id = NULL WHERE truck_id = :tid"),
+                                            {"tid": int(selected_truck)},
                                         )
                                     else:
                                         # Clear this trailer from any previous truck
-                                        tcur.execute(
-                                            "UPDATE trailers SET truck_id = NULL WHERE trailer_id = %s",
-                                            (norm_trailer_id,),
+                                        raw_conn.execute(
+                                            text("UPDATE trailers SET truck_id = NULL WHERE trailer_id = :trid"),
+                                            {"trid": norm_trailer_id},
                                         )
                                         # Link this trailer to this truck
-                                        tcur.execute(
-                                            "UPDATE trailers SET truck_id = %s WHERE trailer_id = %s",
-                                            (int(selected_truck), norm_trailer_id),
+                                        raw_conn.execute(
+                                            text(
+                                                "UPDATE trailers SET truck_id = :tid WHERE trailer_id = :trid"
+                                            ),
+                                            {"tid": int(selected_truck), "trid": norm_trailer_id},
                                         )
                                         # Ensure no other trailers remain linked to this truck
-                                        tcur.execute(
-                                            """
-                                            UPDATE trailers
-                                            SET truck_id = NULL
-                                            WHERE truck_id = %s AND trailer_id <> %s
-                                            """,
-                                            (int(selected_truck), norm_trailer_id),
+                                        raw_conn.execute(
+                                            text(
+                                                """
+                                                UPDATE trailers
+                                                SET truck_id = NULL
+                                                WHERE truck_id = :tid AND trailer_id <> :trid
+                                                """
+                                            ),
+                                            {"tid": int(selected_truck), "trid": norm_trailer_id},
                                         )
-                                    tconn.commit()
+
+                                    raw_conn.commit()
                                 finally:
-                                    tconn.close()
+                                    raw_conn.close()
 
                                 # Loan history upsert
                                 try:
