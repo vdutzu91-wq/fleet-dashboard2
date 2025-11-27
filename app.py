@@ -2841,16 +2841,16 @@ elif page == "Trucks":
                             cancelled = st.form_submit_button("❌ Cancel")
 
                     # Handle form actions
-                    if (
-                        "editing_truck" in st.session_state
-                        and st.session_state.editing_truck == selected_truck
-                    ):
+                    if 'editing_truck' in st.session_state and st.session_state.editing_truck == selected_truck:
                         if cancelled:
                             del st.session_state.editing_truck
                             safe_rerun()
 
                         if saved:
                             try:
+                                # VERY loud debug so we know this executes
+                                st.write("DEBUG: Entering truck SAVE handler")
+
                                 conn = get_db_connection()
                                 cur = conn.cursor()
 
@@ -2862,37 +2862,58 @@ elif page == "Trucks":
                                 prev = cur.fetchone()
                                 prev_driver_id = prev[1] if prev else None
 
-                                debug_params = (
-                                    new_number,
-                                    new_make,
-                                    new_model,
-                                    new_year,
-                                    new_plate,
-                                    new_vin,
-                                    new_status,
-                                    float(new_loan or 0.0),
-                                    new_driver_id,
-                                    new_dispatcher_id,
-                                    selected_truck,
-                                )
-                                print("DEBUG update_truck param types:", [type(p) for p in debug_params])
+                                # --- HARD GUARDS: ensure simple scalar types for IDs ---
+                                # driver
+                                if isinstance(new_driver_id, dict):
+                                    new_driver_id = new_driver_id.get("driver_id")
+                                if isinstance(new_driver_id, list):
+                                    # pick first valid element if any
+                                    new_driver_id = next(
+                                        (x for x in new_driver_id if not isinstance(x, (dict, list))),
+                                        None,
+                                    )
 
-                                cur.execute(
-                                    """
-                                    UPDATE trucks
-                                    SET number = %s,
-                                        make = %s,
-                                        model = %s,
-                                        year = %s,
-                                        plate = %s,
-                                        vin = %s,
-                                        status = %s,
-                                        loan_amount = %s,
-                                        driver_id = %s,
-                                        dispatcher_id = %s
-                                    WHERE truck_id = %s
-                                    """,
-                                    debug_params,
+                                # dispatcher
+                                if isinstance(new_dispatcher_id, dict):
+                                    new_dispatcher_id = new_dispatcher_id.get("dispatcher_id")
+                                if isinstance(new_dispatcher_id, list):
+                                    new_dispatcher_id = next(
+                                        (x for x in new_dispatcher_id if not isinstance(x, (dict, list))),
+                                        None,
+                                    )
+
+                                # trailer
+                                if isinstance(new_trailer_id, dict):
+                                    new_trailer_id = new_trailer_id.get("trailer_id")
+                                if isinstance(new_trailer_id, list):
+                                    new_trailer_id = next(
+                                        (x for x in new_trailer_id if not isinstance(x, (dict, list))),
+                                        None,
+                                    )
+
+                                # Final conversion: only ints or None for ids
+                                try:
+                                    new_driver_id = int(new_driver_id) if new_driver_id is not None else None
+                                except Exception:
+                                    new_driver_id = None
+                                try:
+                                    new_dispatcher_id = int(new_dispatcher_id) if new_dispatcher_id is not None else None
+                                except Exception:
+                                    new_dispatcher_id = None
+                                try:
+                                    new_trailer_id = int(new_trailer_id) if new_trailer_id is not None else None
+                                except Exception:
+                                    new_trailer_id = None
+
+                                # Debug: show types and values in the UI so we see them for sure
+                                st.write(
+                                    "DEBUG params:",
+                                    {
+                                        "new_driver_id": (new_driver_id, type(new_driver_id).__name__),
+                                        "new_dispatcher_id": (new_dispatcher_id, type(new_dispatcher_id).__name__),
+                                        "new_trailer_id": (new_trailer_id, type(new_trailer_id).__name__),
+                                        "selected_truck": (selected_truck, type(selected_truck).__name__),
+                                    },
                                 )
 
                                 # Update truck core fields
@@ -2919,14 +2940,14 @@ elif page == "Trucks":
                                         new_plate,
                                         new_vin,
                                         new_status,
-                                        new_loan,
-                                        new_driver_id,
+                                        float(new_loan or 0.0),
+                                       new_driver_id,
                                         new_dispatcher_id,
                                         selected_truck,
                                     ),
                                 )
 
-                                # Update trailer linkage in trailers table
+                                # Trailer linkage in trailers table
                                 if new_trailer_id is None:
                                     # Unassign this truck from any trailers
                                     cur.execute(
@@ -2944,7 +2965,7 @@ elif page == "Trucks":
                                         "UPDATE trailers SET truck_id = %s WHERE trailer_id = %s",
                                         (selected_truck, new_trailer_id),
                                     )
-                                    # Ensure no other trailers remain linked to this truck
+                                   # Ensure no other trailers remain linked to this truck
                                     cur.execute(
                                         """
                                         UPDATE trailers
@@ -2967,9 +2988,7 @@ elif page == "Trucks":
                                         loan_end_input,
                                     )
                                 except Exception as e:
-                                    st.warning(
-                                        f"Truck loan history update warning: {e}"
-                                    )
+                                    st.warning(f"Truck loan history update warning: {e}")
 
                                 # Driver assignment history
                                 if new_driver_id and new_driver_id != prev_driver_id:
