@@ -4666,36 +4666,58 @@ if page == "Income":
     if st.button("Show Sample Address Data"):
         from sqlalchemy import text
 
-        raw_conn = get_raw_db_connection()
-        try:
-            result = raw_conn.execute(
-                text(
-                    """
-                    SELECT 
-                        income_id,
-                        truck_id,
-                        pickup_city,
-                        pickup_state, 
-                        pickup_zip,
-                        pickup_address,
-                        pickup_full_address,
-                        delivery_city,
-                        delivery_state,
-                        delivery_zip,
-                        delivery_address,
-                        delivery_full_address,
-                        empty_miles
-                    FROM income
-                    WHERE pickup_date IS NOT NULL
-                    ORDER BY pickup_date DESC
-                    LIMIT 10
-                    """
-                )
-            )
-            rows = result.fetchall()
-        finally:
-            raw_conn.close()
+        def init_db_schema():
+            conn = get_raw_db_connection()
+            try:
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS income (
+                        income_id SERIAL PRIMARY KEY,
+                        date DATE NOT NULL,
+                        source TEXT,
+                        amount NUMERIC(12, 2),
+                        truck_id INTEGER REFERENCES trucks(truck_id),
+                        description TEXT,
+                        driver_name TEXT,
+                        broker_number TEXT,
+                        tonu TEXT,
+                        empty_miles NUMERIC(10, 2),
+                        loaded_miles NUMERIC(10, 2),
+                        rpm NUMERIC(10, 4),
+                        pickup_date DATE,
+                        pickup_time TIME,                    -- NEW
+                        pickup_city TEXT,
+                        pickup_state TEXT,
+                        pickup_zip TEXT,
+                        pickup_address TEXT,
+                        pickup_full_address TEXT,            -- NEW
+                        delivery_date DATE,
+                        delivery_time TIME,                  -- NEW
+                        delivery_city TEXT,
+                        delivery_state TEXT,
+                        delivery_zip TEXT,
+                        delivery_address TEXT,
+                        delivery_full_address TEXT,          -- NEW
+                        stops INTEGER
+                    );
+                """))
+                conn.commit()
+            finally:
+                conn.close()
 
+        def migrate_income_add_time_and_full_address():
+            conn = get_raw_db_connection()
+            try:
+                conn.execute(text("""
+                    ALTER TABLE income
+                    ADD COLUMN IF NOT EXISTS pickup_time TIME,
+                    ADD COLUMN IF NOT EXISTS delivery_time TIME,
+                    ADD COLUMN IF NOT EXISTS pickup_full_address TEXT,
+                    ADD COLUMN IF NOT EXISTS delivery_full_address TEXT;
+                """))
+                conn.commit()
+            finally:
+                conn.close()
+                
         if rows:
             df_diag = pd.DataFrame(
                 rows,
