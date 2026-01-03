@@ -4848,30 +4848,11 @@ if page == "Income":
         # -------------------------
         # Fetch and filter income by date
         # -------------------------
+        from sqlalchemy import text
+        
         raw_conn = get_raw_db_connection()
         try:
-            from sqlalchemy import text
-
-            # 1) Detect whether pickup_time / delivery_time exist in the income table
-            col_result = raw_conn.execute(
-                text(
-                    """
-                    SELECT column_name 
-                    FROM information_schema.columns
-                    WHERE table_name = 'income'
-                    """
-                )
-            )
-            cols = {row[0] for row in col_result.fetchall()}
-
-            has_pickup_time = "pickup_time" in cols
-            has_delivery_time = "delivery_time" in cols
-
-            # 2) Build SELECT list dynamically depending on what exists
-            time_select_pickup = "i.pickup_time" if has_pickup_time else "NULL AS pickup_time"
-            time_select_delivery = "i.delivery_time" if has_delivery_time else "NULL AS delivery_time"
-
-            q = f"""
+            q = text("""
                 SELECT 
                     i.income_id, 
                     i.date, 
@@ -4887,13 +4868,13 @@ if page == "Income":
                     i.loaded_miles, 
                     i.rpm,
                     i.pickup_date, 
-                    {time_select_pickup},
+                    i.pickup_time,
                     i.pickup_city,
                     i.pickup_state,
                     i.pickup_zip,
                     i.pickup_address,
                     i.delivery_date, 
-                    {time_select_delivery},
+                    i.delivery_time,
                     i.delivery_city,
                     i.delivery_state,
                     i.delivery_zip,
@@ -4903,11 +4884,10 @@ if page == "Income":
                 LEFT JOIN trucks t ON i.truck_id = t.truck_id
                 WHERE i.date BETWEEN :start_date AND :end_date
                 ORDER BY i.date DESC, i.income_id DESC
-            """
+            """)
 
-            # IMPORTANT: use the SQLAlchemy connection with read_sql_query
             income_df = pd.read_sql_query(
-                text(q),
+                q,
                 raw_conn,
                 params={"start_date": start_date, "end_date": end_date},
             )
