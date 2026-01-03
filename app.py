@@ -4850,14 +4850,32 @@ if page == "Income":
         # Fetch and filter income by date
         raw_conn = get_raw_db_connection()
         try:
-            q = """
+            # 1) Detect whether pickup_time / delivery_time exist in the income table
+            with raw_conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT column_name 
+                    FROM information_schema.columns
+                    WHERE table_name = 'income'
+                    """
+                )
+                cols = {r[0] for r in cur.fetchall()}
+
+            has_pickup_time = "pickup_time" in cols
+            has_delivery_time = "delivery_time" in cols
+
+            # 2) Build SELECT list dynamically depending on what exists
+            time_select_pickup = "i.pickup_time" if has_pickup_time else "NULL AS pickup_time"
+            time_select_delivery = "i.delivery_time" if has_delivery_time else "NULL AS delivery_time"
+
+            q = f"""
                 SELECT 
                     i.income_id, 
                     i.date, 
                     i.source, 
                     i.amount, 
                     i.truck_id,
-                    t.number as truck_number,
+                    t.number AS truck_number,
                     i.description,
                     i.driver_name,
                     i.broker_number,
@@ -4866,13 +4884,13 @@ if page == "Income":
                     i.loaded_miles, 
                     i.rpm,
                     i.pickup_date, 
-                    i.pickup_time,
+                    {time_select_pickup},
                     i.pickup_city,
                     i.pickup_state,
                     i.pickup_zip,
                     i.pickup_address,
                     i.delivery_date, 
-                    i.delivery_time,
+                    {time_select_delivery},
                     i.delivery_city,
                     i.delivery_state,
                     i.delivery_zip,
@@ -4881,8 +4899,9 @@ if page == "Income":
                 FROM income i
                 LEFT JOIN trucks t ON i.truck_id = t.truck_id
                 WHERE i.date BETWEEN %s AND %s
-                ORDER BY i.date DESC, i.delivery_time DESC, i.income_id DESC
+                ORDER BY i.date DESC, i.income_id DESC
             """
+
             income_df = pd.read_sql_query(q, raw_conn, params=(start_date, end_date))
         except Exception as e:
             st.error(f"Failed to load income: {e}")
