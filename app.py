@@ -4866,19 +4866,24 @@ if page == "Income":
             st.warning("Start date cannot be after end date. Adjusting.")
             start_date, end_date = end_date, start_date
 
+        # -------------------------
         # Fetch and filter income by date
+        # -------------------------
         raw_conn = get_raw_db_connection()
         try:
+            from sqlalchemy import text
+
             # 1) Detect whether pickup_time / delivery_time exist in the income table
-            with raw_conn.cursor() as cur:
-                cur.execute(
+            col_result = raw_conn.execute(
+                text(
                     """
                     SELECT column_name 
                     FROM information_schema.columns
                     WHERE table_name = 'income'
                     """
                 )
-                cols = {r[0] for r in cur.fetchall()}
+            )
+            cols = {row[0] for row in col_result.fetchall()}
 
             has_pickup_time = "pickup_time" in cols
             has_delivery_time = "delivery_time" in cols
@@ -4917,11 +4922,17 @@ if page == "Income":
                     i.stops
                 FROM income i
                 LEFT JOIN trucks t ON i.truck_id = t.truck_id
-                WHERE i.date BETWEEN %s AND %s
+                WHERE i.date BETWEEN :start_date AND :end_date
                 ORDER BY i.date DESC, i.income_id DESC
             """
 
-            income_df = pd.read_sql_query(q, raw_conn, params=(start_date, end_date))
+            # IMPORTANT: use the SQLAlchemy connection with read_sql_query
+            income_df = pd.read_sql_query(
+                text(q),
+                raw_conn,
+                params={"start_date": start_date, "end_date": end_date},
+            )
+
         except Exception as e:
             st.error(f"Failed to load income: {e}")
             income_df = pd.DataFrame()
