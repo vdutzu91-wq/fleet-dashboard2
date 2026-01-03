@@ -453,6 +453,25 @@ def init_all_tables():
 # Actually run the initialization once at import time
 # init_all_tables()
 
+def migrate_income_table():
+    """Ensure income table has all required columns (safe to run multiple times)"""
+    from sqlalchemy import text
+    
+    raw_conn = get_raw_db_connection()
+    try:
+        raw_conn.execute(text("""
+            ALTER TABLE income
+            ADD COLUMN IF NOT EXISTS pickup_time TIME,
+            ADD COLUMN IF NOT EXISTS delivery_time TIME,
+            ADD COLUMN IF NOT EXISTS pickup_full_address TEXT,
+            ADD COLUMN IF NOT EXISTS delivery_full_address TEXT;
+        """))
+        raw_conn.commit()
+    except Exception:
+        pass  # Columns already exist or other non-critical error
+    finally:
+        raw_conn.close()
+
 # ============================================================================
 import hashlib
 import json
