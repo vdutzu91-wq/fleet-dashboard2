@@ -7286,7 +7286,7 @@ elif page == "Reports":
     st.header("📊 Reports")
 
     # -----------------------------
-    # Date Preset Toolbar (KEEPING)
+    # Date Preset Toolbar
     # -----------------------------
     with st.expander("Date Range", expanded=True):
         today = date.today()
@@ -7326,6 +7326,8 @@ elif page == "Reports":
     # -----------------------------
     # Local helpers + guards
     # -----------------------------
+    from sqlalchemy import text
+
     def _fmt_money(v):
         try:
             return f"${float(v):,.2f}"
@@ -7335,89 +7337,91 @@ elif page == "Reports":
     def _days_between(a, b):
         return (b - a).days + 1
 
-    # Use your existing helper; if missing, add a fallback
-    if "safe_read_sql" not in globals():
-        def safe_read_sql(query, conn, params=None):
-            try:
-                return pd.read_sql_query(query, conn, params=params)
-            except Exception as e:
-                st.warning(f"Query failed: {e}")
-                return pd.DataFrame()
+    def safe_read_sql(query, conn, params=None):
+        try:
+            if isinstance(query, str):
+                query = text(query)
+            return pd.read_sql_query(query, conn, params=params)
+        except Exception as e:
+            st.warning(f"Query failed: {e}")
+            return pd.DataFrame()
 
     def table_exists(name: str) -> bool:
         try:
-            c = get_db_connection().cursor()
-            c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?;", (name,))
-            return c.fetchone() is not None
+            raw_conn = get_raw_db_connection()
+            result = raw_conn.execute(
+                text("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_name = :tname
+                    )
+                """),
+                {"tname": name}
+            )
+            exists = result.fetchone()[0]
+            raw_conn.close()
+            return exists
         except Exception:
             return False
 
     def column_exists(table: str, column: str) -> bool:
         try:
-            c = get_db_connection().cursor()
-            cols = [r[1] for r in c.fetchall()]
-            return column in cols
+            raw_conn = get_raw_db_connection()
+            result = raw_conn.execute(
+                text("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.columns 
+                        WHERE table_name = :tname AND column_name = :cname
+                    )
+                """),
+                {"tname": table, "cname": column}
+            )
+            exists = result.fetchone()[0]
+            raw_conn.close()
+            return exists
         except Exception:
             return False
 
     def _to_date(x, default=None):
-        # Robust missing detection without pd.NA truthiness
-        try:
-            import pandas as pd
-        except Exception:
-            pass
-
-        # Treat clearly missing values
         if x is None or x == "":
             return default
-
-        # Handle pandas NA/NaT safely
         try:
-            # pd.isna covers pd.NA, NaT, np.nan
-            if 'pd' in globals():
-                if pd.isna(x):
-                    return default
+            if pd.isna(x):
+                return default
         except Exception:
             pass
-
-        # Try parsing YYYY-MM-DD fast path
         try:
             return datetime.strptime(str(x), "%Y-%m-%d").date()
         except Exception:
             pass
-
-        # Fallback to pandas parser (handles many formats)
         try:
-            if 'pd' in globals():
-                dt = pd.to_datetime(x, errors="coerce")
-                if pd.isna(dt):
-                    return default
-                return dt.date()
+            dt = pd.to_datetime(x, errors="coerce")
+            if pd.isna(dt):
+                return default
+            return dt.date()
         except Exception:
             pass
-
         return default
 
-    # Your existing dispatcher map (KEEP)
     def get_dispatcher_map(conn):
         try:
-            df = pd.read_sql_query(
-                """
-                SELECT t.truck_id, COALESCE(d.name, '') AS dispatcher_name
-                FROM trucks t
-                LEFT JOIN dispatchers d ON d.dispatcher_id = t.dispatcher_id
-                """,
+            df = safe_read_sql(
+                text("""
+                    SELECT t.truck_id, COALESCE(d.name, '') AS dispatcher_name
+                    FROM trucks t
+                    LEFT JOIN dispatchers d ON d.dispatcher_id = t.dispatcher_id
+                """),
                 conn
             )
             base_map = dict(zip(df["truck_id"], df["dispatcher_name"]))
 
             try:
-                df2 = pd.read_sql_query(
-                    """
-                    SELECT dt.truck_id, d.name AS dispatcher_name
-                    FROM dispatcher_trucks dt
-                    JOIN dispatchers d ON d.dispatcher_id = dt.dispatcher_id
-                    """,
+                df2 = safe_read_sql(
+                    text("""
+                        SELECT dt.truck_id, d.name AS dispatcher_name
+                        FROM dispatcher_trucks dt
+                        JOIN dispatchers d ON d.dispatcher_id = dt.dispatcher_id
+                    """),
                     conn
                 )
                 fallback_map = dict(zip(df2["truck_id"], df2["dispatcher_name"]))
@@ -7434,7 +7438,7 @@ elif page == "Reports":
         except Exception:
             return {}
 
-    conn = get_db_connection()
+    conn = get_raw_db_connection()
 
     # Quick schema flags
     has_trucks = table_exists("trucks")
@@ -7446,1379 +7450,843 @@ elif page == "Reports":
     has_tr_hist = table_exists("trailer_truck_history")
     has_trailers = table_exists("trailers")
 
-    # Truck list (KEEP)
-    conn_tmp = get_db_connection()
+    # Truck list
     try:
-        trucks_df = safe_read_sql("SELECT truck_id, number FROM trucks", conn) if has_trucks else pd.DataFrame(columns=["truck_id","number"])
-    # Trailer number by truck (via trailers.truck_id)
-        trailer_map = {}
-        if has_trailers and column_exists("trailers", "truck_id"):
-            tr_df = safe_read_sql(
-                """
+        trucks_df = safe_read_sql(
+            text("SELECT truck_id, number FROM trucks"),
+            conn
+        ) if has_trucks else pd.DataFrame(columns=["truck_id", "number"])
+    except Exception:
+        trucks_df = pd.DataFrame(columns=["truck_id", "number"])
+
+    # Trailer number by truck
+    trailer_map = {}
+    if has_trailers and column_exists("trailers", "truck_id"):
+        tr_df = safe_read_sql(
+            text("""
                 SELECT tr.trailer_id, tr.number AS trailer_number, tr.truck_id
                 FROM trailers tr
                 WHERE tr.truck_id IS NOT NULL
-                """,
-                conn,
-            )
-            if tr_df is not None and not tr_df.empty:
-                trailer_map = dict(zip(tr_df["truck_id"], tr_df["trailer_number"]))
-    finally:
-        conn_tmp.close()
+            """),
+            conn,
+        )
+        if tr_df is not None and not tr_df.empty:
+            trailer_map = dict(zip(tr_df["truck_id"], tr_df["trailer_number"]))
 
     # -------------------------------------------
     # Dispatcher-aware Income and Expenses
     # -------------------------------------------
-    # Income per truck and dispatcher by date overlap
-    conn_tmp = get_db_connection()
-    try:
-        if has_income and column_exists("income", "truck_id"):
-            if has_assignments and has_dispatchers:
-                q_inc = """
-                    SELECT 
-                        i.truck_id,
-                        tr.number AS truck_number,
-                        disp.dispatcher_id,
-                        disp.name AS dispatcher_name,
-                        SUM(i.amount) AS total_income
-                    FROM income i
-                    LEFT JOIN trucks tr ON tr.truck_id = i.truck_id
-                    LEFT JOIN assignments a ON a.truck_id = i.truck_id 
-                        AND DATE(a.start_date) <= DATE(i.date)
-                        AND (a.end_date IS NULL OR a.end_date = '' OR DATE(a.end_date) >= DATE(i.date))
-                    LEFT JOIN dispatchers disp ON disp.dispatcher_id = a.dispatcher_id
-                    WHERE DATE(i.date) BETWEEN DATE(?) AND DATE(?)
-                    GROUP BY i.truck_id, tr.number, disp.dispatcher_id, disp.name
-                """
-                income_df = safe_read_sql(q_inc, conn, [start_date.isoformat(), end_date.isoformat()])
-            else:
-                income_df = safe_read_sql(
-                    """
+    if has_income and column_exists("income", "truck_id"):
+        if has_assignments and has_dispatchers:
+            q_inc = text("""
+                SELECT 
+                    i.truck_id,
+                    tr.number AS truck_number,
+                    disp.dispatcher_id,
+                    disp.name AS dispatcher_name,
+                    SUM(i.amount) AS total_income
+                FROM income i
+                LEFT JOIN trucks tr ON tr.truck_id = i.truck_id
+                LEFT JOIN assignments a ON a.truck_id = i.truck_id 
+                    AND a.start_date <= i.date
+                    AND (a.end_date IS NULL OR a.end_date = '' OR a.end_date >= i.date)
+                LEFT JOIN dispatchers disp ON disp.dispatcher_id = a.dispatcher_id
+                WHERE i.date BETWEEN :start_date AND :end_date
+                GROUP BY i.truck_id, tr.number, disp.dispatcher_id, disp.name
+            """)
+            income_df = safe_read_sql(q_inc, conn, {"start_date": start_date, "end_date": end_date})
+        else:
+            income_df = safe_read_sql(
+                text("""
                     SELECT truck_id, COALESCE(SUM(amount), 0) AS total_income
                     FROM income
-                    WHERE DATE(date) BETWEEN DATE(?) AND DATE(?)
+                    WHERE date BETWEEN :start_date AND :end_date
                     GROUP BY truck_id
-                    """,
-                    conn_tmp,
-                    params=[start_date.isoformat(), end_date.isoformat()],
-                )
-                income_df["truck_number"] = income_df["truck_id"].map(dict(zip(trucks_df.truck_id, trucks_df.number)))
-                income_df["dispatcher_id"] = None
-                income_df["dispatcher_name"] = None
-        else:
-            income_df = pd.DataFrame(columns=["truck_id","truck_number","dispatcher_id","dispatcher_name","total_income"])
-    finally:
-        conn_tmp.close()
+                """),
+                conn,
+                params={"start_date": start_date, "end_date": end_date},
+            )
+            income_df["truck_number"] = income_df["truck_id"].map(dict(zip(trucks_df.truck_id, trucks_df.number)))
+            income_df["dispatcher_id"] = None
+            income_df["dispatcher_name"] = None
+    else:
+        income_df = pd.DataFrame(columns=["truck_id", "truck_number", "dispatcher_id", "dispatcher_name", "total_income"])
 
-    # Expenses per truck and dispatcher by date overlap
-    conn_tmp = get_db_connection()
-    try:
-        if has_expenses and column_exists("expenses", "truck_id"):
-            if has_assignments and has_dispatchers and column_exists("expenses","date"):
-                q_exp = """
-                    SELECT 
-                        e.truck_id,
-                        tr.number AS truck_number,
-                        disp.dispatcher_id,
-                        disp.name AS dispatcher_name,
-                        SUM(e.amount) AS total_expenses
-                    FROM expenses e
-                    LEFT JOIN trucks tr ON tr.truck_id = e.truck_id
-                    LEFT JOIN assignments a ON a.truck_id = e.truck_id
-                        AND DATE(a.start_date) <= DATE(e.date)
-                        AND (a.end_date IS NULL OR a.end_date = '' OR DATE(a.end_date) >= DATE(e.date))
-                    LEFT JOIN dispatchers disp ON disp.dispatcher_id = a.dispatcher_id
-                    WHERE DATE(e.date) BETWEEN DATE(?) AND DATE(?)
-                    GROUP BY e.truck_id, tr.number, disp.dispatcher_id, disp.name
-                """
-                expense_df = safe_read_sql(q_exp, conn, [start_date.isoformat(), end_date.isoformat()])
-            else:
-                expense_df = safe_read_sql(
-                    """
+    # Expenses per truck and dispatcher
+    if has_expenses and column_exists("expenses", "truck_id"):
+        if has_assignments and has_dispatchers and column_exists("expenses", "date"):
+            q_exp = text("""
+                SELECT 
+                    e.truck_id,
+                    tr.number AS truck_number,
+                    disp.dispatcher_id,
+                    disp.name AS dispatcher_name,
+                    SUM(e.amount) AS total_expenses
+                FROM expenses e
+                LEFT JOIN trucks tr ON tr.truck_id = e.truck_id
+                LEFT JOIN assignments a ON a.truck_id = e.truck_id
+                    AND a.start_date <= e.date
+                    AND (a.end_date IS NULL OR a.end_date = '' OR a.end_date >= e.date)
+                LEFT JOIN dispatchers disp ON disp.dispatcher_id = a.dispatcher_id
+                WHERE e.date BETWEEN :start_date AND :end_date
+                GROUP BY e.truck_id, tr.number, disp.dispatcher_id, disp.name
+            """)
+            expense_df = safe_read_sql(q_exp, conn, {"start_date": start_date, "end_date": end_date})
+        else:
+            expense_df = safe_read_sql(
+                text("""
                     SELECT truck_id, COALESCE(SUM(amount), 0) AS total_expenses
                     FROM expenses
-                    WHERE DATE(date) BETWEEN DATE(?) AND DATE(?)
+                    WHERE date BETWEEN :start_date AND :end_date
                     GROUP BY truck_id
-                    """,
-                    conn_tmp,
-                    params=[start_date.isoformat(), end_date.isoformat()],
-                )
-                expense_df["truck_number"] = expense_df["truck_id"].map(dict(zip(trucks_df.truck_id, trucks_df.number)))
-                expense_df["dispatcher_id"] = None
-                expense_df["dispatcher_name"] = None
-        else:
-            expense_df = pd.DataFrame(columns=["truck_id","truck_number","dispatcher_id","dispatcher_name","total_expenses"])
-    finally:
-        conn_tmp.close()
-
-    # --------------------------------------------------
-    # Accurate (pro-rated) Loans per Truck using History
-    # --------------------------------------------------
-    MONTHLY_TO_DAILY_DIVISOR = 30.0  # change to 30.4375 if you prefer
-
-    # Fetch loans overlapping window
-    if has_loans_hist:
-        df_loans = safe_read_sql(
-            """
-            SELECT
-                lh.entity_type, -- 'truck' | 'trailer'
-                lh.entity_id,
-                lh.monthly_amount,
-                DATE(lh.start_date) AS s,
-                DATE(COALESCE(NULLIF(lh.end_date,''), '9999-12-31')) AS e
-            FROM loans_history lh
-            WHERE (lh.end_date IS NULL OR lh.end_date = '' OR DATE(lh.end_date) >= DATE(?))
-              AND DATE(lh.start_date) <= DATE(?)
-            """,
-            conn,
-            [start_date.isoformat(), end_date.isoformat()],
-        )
-        if df_loans is None:
-            df_loans = pd.DataFrame(columns=["entity_type","entity_id","monthly_amount","s","e"])
+                """),
+                conn,
+                params={"start_date": start_date, "end_date": end_date},
+            )
+            expense_df["truck_number"] = expense_df["truck_id"].map(dict(zip(trucks_df.truck_id, trucks_df.number)))
+            expense_df["dispatcher_id"] = None
+            expense_df["dispatcher_name"] = None
     else:
-        df_loans = pd.DataFrame(columns=["entity_type","entity_id","monthly_amount","s","e"])
+        expense_df = pd.DataFrame(columns=["truck_id", "truck_number", "dispatcher_id", "dispatcher_name", "total_expenses"])
 
-    # Trailer-truck history intervals (if available)
-    hist_rows = []
-    if has_tr_hist and column_exists("trailer_truck_history","truck_id"):
-        df_hist = safe_read_sql(
-            """
-            SELECT trailer_id, truck_id, DATE(start_date) AS s, DATE(COALESCE(NULLIF(end_date,''), '9999-12-31')) AS e
-            FROM trailer_truck_history
-            WHERE truck_id IS NOT NULL
-              AND ( (end_date IS NULL OR end_date = '') 
-                    OR NOT (DATE(end_date) < DATE(?) OR DATE(start_date) > DATE(?)) )
-            """,
-            conn,
-            [start_date.isoformat(), end_date.isoformat()],
+    # -------------------------------------------
+    # Loans calculation (dispatcher-aware)
+    # -------------------------------------------
+    loans_df = pd.DataFrame(columns=["truck_id", "truck_number", "dispatcher_id", "dispatcher_name", "total_loans"])
+    
+    if has_loans_hist and has_trucks:
+        try:
+            # Get all loan records in date range
+            q_loans = text("""
+                SELECT 
+                    lh.truck_id,
+                    tr.number AS truck_number,
+                    lh.dispatcher_id,
+                    d.name AS dispatcher_name,
+                    lh.amount,
+                    lh.date,
+                    lh.type
+                FROM loans_history lh
+                LEFT JOIN trucks tr ON tr.truck_id = lh.truck_id
+                LEFT JOIN dispatchers d ON d.dispatcher_id = lh.dispatcher_id
+                WHERE lh.date BETWEEN :start_date AND :end_date
+                ORDER BY lh.truck_id, lh.date
+            """)
+            loans_raw = safe_read_sql(q_loans, conn, {"start_date": start_date, "end_date": end_date})
+            
+            if not loans_raw.empty:
+                # Calculate net loans per truck/dispatcher
+                loans_agg = []
+                for (tid, tnum, did, dname), grp in loans_raw.groupby(
+                    ["truck_id", "truck_number", "dispatcher_id", "dispatcher_name"], dropna=False
+                ):
+                    net = 0.0
+                    for _, row in grp.iterrows():
+                        amt = float(row["amount"]) if row["amount"] else 0.0
+                        if row["type"] == "given":
+                            net += amt
+                        elif row["type"] == "returned":
+                            net -= amt
+                    loans_agg.append({
+                        "truck_id": tid,
+                        "truck_number": tnum,
+                        "dispatcher_id": did,
+                        "dispatcher_name": dname,
+                        "total_loans": net
+                    })
+                loans_df = pd.DataFrame(loans_agg)
+        except Exception as e:
+            st.warning(f"Loans calculation failed: {e}")
+
+    # -------------------------------------------
+    # Merge income, expenses, loans by truck + dispatcher
+    # -------------------------------------------
+    def merge_on_truck_dispatcher(left, right, how="outer"):
+        """Merge two DataFrames on truck_id + dispatcher_id"""
+        if left.empty and right.empty:
+            return pd.DataFrame()
+        if left.empty:
+            return right
+        if right.empty:
+            return left
+        return pd.merge(
+            left, right,
+            on=["truck_id", "truck_number", "dispatcher_id", "dispatcher_name"],
+            how=how
         )
-        if df_hist is not None and not df_hist.empty:
-            for _, r in df_hist.iterrows():
-                hist_rows.append({
-                    "trailer_id": int(r["trailer_id"]),
-                    "truck_id": int(r["truck_id"]),
-                    "s": _to_date(r["s"], date(1900,1,1)),
-                    "e": _to_date(r["e"], date(9999,12,31)),
+
+    combined = income_df.copy() if not income_df.empty else pd.DataFrame(
+        columns=["truck_id", "truck_number", "dispatcher_id", "dispatcher_name", "total_income"]
+    )
+    combined = merge_on_truck_dispatcher(combined, expense_df, how="outer")
+    combined = merge_on_truck_dispatcher(combined, loans_df, how="outer")
+
+    # Fill NaN
+    for col in ["total_income", "total_expenses", "total_loans"]:
+        if col not in combined.columns:
+            combined[col] = 0.0
+        else:
+            combined[col] = combined[col].fillna(0.0)
+
+    # Calculate profit
+    combined["profit"] = combined["total_income"] - combined["total_expenses"] - combined["total_loans"]
+
+    # Add trailer numbers
+    if not combined.empty and "truck_id" in combined.columns:
+        combined["trailer_number"] = combined["truck_id"].map(trailer_map).fillna("")
+
+    # -------------------------------------------
+    # Report Type Selection
+    # -------------------------------------------
+    st.markdown("---")
+    report_type = st.radio(
+        "Select Report Type",
+        [
+            "Summary by Truck",
+            "Summary by Dispatcher",
+            "Detailed by Truck & Dispatcher",
+            "Income Details",
+            "Expense Details",
+            "Loan Details",
+            "Truck Timeline",
+            "Dispatcher Performance",
+        ],
+        horizontal=True,
+    )
+
+    st.markdown("---")
+
+    # -------------------------------------------
+    # SUMMARY BY TRUCK
+    # -------------------------------------------
+    if report_type == "Summary by Truck":
+        if combined.empty:
+            st.info("No data for the selected period.")
+        else:
+            df = combined.copy()
+            df_group = df.groupby(
+                ["truck_id", "truck_number", "trailer_number"],
+                dropna=False,
+                as_index=False
+            ).agg(
+                total_income=("total_income", "sum"),
+                total_expenses=("total_expenses", "sum"),
+                total_loans=("total_loans", "sum"),
+                profit=("profit", "sum"),
+            )
+
+            df_group["profit_margin_%"] = df_group.apply(
+                lambda r: (r["profit"] / r["total_income"] * 100.0) if r["total_income"] else 0.0,
+                axis=1,
+            )
+
+            st.subheader("Summary by Truck")
+            st.dataframe(
+                df_group.assign(
+                    total_income=df_group["total_income"].map(_fmt_money),
+                    total_expenses=df_group["total_expenses"].map(_fmt_money),
+                    total_loans=df_group["total_loans"].map(_fmt_money),
+                    profit=df_group["profit"].map(_fmt_money),
+                    profit_margin_%=df_group["profit_margin_%"].map(lambda x: f"{x:,.2f}%"),
+                ),
+                use_container_width=True,
+            )
+
+            total_inc = df_group["total_income"].sum()
+            total_exp = df_group["total_expenses"].sum()
+            total_loan = df_group["total_loans"].sum()
+            total_prof = df_group["profit"].sum()
+            st.markdown(
+                f"**Total Income:** {_fmt_money(total_inc)} &nbsp; | &nbsp; "
+                f"**Total Expenses:** {_fmt_money(total_exp)} &nbsp; | &nbsp; "
+                f"**Total Loans:** {_fmt_money(total_loan)} &nbsp; | &nbsp; "
+                f"**Net Profit:** {_fmt_money(total_prof)}"
+            )
+
+    # -------------------------------------------
+    # SUMMARY BY DISPATCHER
+    # -------------------------------------------
+    elif report_type == "Summary by Dispatcher":
+        if combined.empty:
+            st.info("No data for the selected period.")
+        else:
+            df = combined.copy()
+            # For trucks without dispatcher assignments, dispatcher_name may be null
+            df["dispatcher_name"] = df["dispatcher_name"].fillna("Unassigned")
+            df_group = df.groupby(
+                ["dispatcher_id", "dispatcher_name"],
+                dropna=False,
+                as_index=False,
+            ).agg(
+                total_income=("total_income", "sum"),
+                total_expenses=("total_expenses", "sum"),
+                total_loans=("total_loans", "sum"),
+                profit=("profit", "sum"),
+            )
+
+            df_group["profit_margin_%"] = df_group.apply(
+                lambda r: (r["profit"] / r["total_income"] * 100.0) if r["total_income"] else 0.0,
+                axis=1,
+            )
+
+            st.subheader("Summary by Dispatcher")
+            st.dataframe(
+                df_group.assign(
+                    total_income=df_group["total_income"].map(_fmt_money),
+                    total_expenses=df_group["total_expenses"].map(_fmt_money),
+                    total_loans=df_group["total_loans"].map(_fmt_money),
+                    profit=df_group["profit"].map(_fmt_money),
+                    profit_margin_%=df_group["profit_margin_%"].map(lambda x: f"{x:,.2f}%"),
+                ),
+                use_container_width=True,
+            )
+
+            total_inc = df_group["total_income"].sum()
+            total_exp = df_group["total_expenses"].sum()
+            total_loan = df_group["total_loans"].sum()
+            total_prof = df_group["profit"].sum()
+            st.markdown(
+                f"**Total Income:** {_fmt_money(total_inc)} &nbsp; | &nbsp; "
+                f"**Total Expenses:** {_fmt_money(total_exp)} &nbsp; | &nbsp; "
+                f"**Total Loans:** {_fmt_money(total_loan)} &nbsp; | &nbsp; "
+                f"**Net Profit:** {_fmt_money(total_prof)}"
+            )
+
+    # -------------------------------------------
+    # DETAILED BY TRUCK & DISPATCHER
+    # -------------------------------------------
+    elif report_type == "Detailed by Truck & Dispatcher":
+        if combined.empty:
+            st.info("No data for the selected period.")
+        else:
+            df = combined.copy()
+            df["dispatcher_name"] = df["dispatcher_name"].fillna("Unassigned")
+
+            # Optional filters
+            col1, col2 = st.columns(2)
+            # Truck filter
+            truck_options = ["All"] + sorted(df["truck_number"].dropna().unique().tolist())
+            chosen_truck = col1.selectbox("Filter by Truck", truck_options)
+            if chosen_truck != "All":
+                df = df[df["truck_number"] == chosen_truck]
+
+            # Dispatcher filter
+            dispatcher_options = ["All"] + sorted(df["dispatcher_name"].dropna().unique().tolist())
+            chosen_disp = col2.selectbox("Filter by Dispatcher", dispatcher_options)
+            if chosen_disp != "All":
+                df = df[df["dispatcher_name"] == chosen_disp]
+
+            if df.empty:
+                st.info("No matching data after filters.")
+            else:
+                df_view = df[
+                    [
+                        "truck_number",
+                        "trailer_number",
+                        "dispatcher_name",
+                        "total_income",
+                        "total_expenses",
+                        "total_loans",
+                        "profit",
+                    ]
+                ].copy()
+
+                df_view.rename(
+                    columns={
+                        "truck_number": "Truck",
+                        "trailer_number": "Trailer",
+                        "dispatcher_name": "Dispatcher",
+                        "total_income": "Income",
+                        "total_expenses": "Expenses",
+                        "total_loans": "Loans",
+                        "profit": "Profit",
+                    },
+                    inplace=True,
+                )
+
+                st.subheader("Detailed by Truck & Dispatcher")
+                st.dataframe(
+                    df_view.assign(
+                        Income=df_view["Income"].map(_fmt_money),
+                        Expenses=df_view["Expenses"].map(_fmt_money),
+                        Loans=df_view["Loans"].map(_fmt_money),
+                        Profit=df_view["Profit"].map(_fmt_money),
+                    ),
+                    use_container_width=True,
+                )
+
+                total_inc = df_view["Income"].sum()
+                total_exp = df_view["Expenses"].sum()
+                total_loan = df_view["Loans"].sum()
+                total_prof = df_view["Profit"].sum()
+                st.markdown(
+                    f"**Total Income:** {_fmt_money(total_inc)} &nbsp; | &nbsp; "
+                    f"**Total Expenses:** {_fmt_money(total_exp)} &nbsp; | &nbsp; "
+                    f"**Total Loans:** {_fmt_money(total_loan)} &nbsp; | &nbsp; "
+                    f"**Net Profit:** {_fmt_money(total_prof)}"
+                )
+
+    # -------------------------------------------
+    # INCOME DETAILS
+    # -------------------------------------------
+    elif report_type == "Income Details":
+        if not has_income:
+            st.info("No income table found.")
+        else:
+            q_income_detail = text("""
+                SELECT 
+                    i.date,
+                    i.truck_id,
+                    tr.number AS truck_number,
+                    i.amount,
+                    i.load_number,
+                    i.pickup_location,
+                    i.delivery_location,
+                    i.loaded_miles,
+                    i.empty_miles,
+                    disp.name AS dispatcher_name
+                FROM income i
+                LEFT JOIN trucks tr ON tr.truck_id = i.truck_id
+                LEFT JOIN assignments a ON a.truck_id = i.truck_id
+                    AND a.start_date <= i.date
+                    AND (a.end_date IS NULL OR a.end_date = '' OR a.end_date >= i.date)
+                LEFT JOIN dispatchers disp ON disp.dispatcher_id = a.dispatcher_id
+                WHERE i.date BETWEEN :start_date AND :end_date
+                ORDER BY i.date DESC, i.truck_id
+            """)
+            income_detail = safe_read_sql(q_income_detail, conn, {"start_date": start_date, "end_date": end_date})
+
+            if income_detail.empty:
+                st.info("No income records for the selected period.")
+            else:
+                income_detail["dispatcher_name"] = income_detail["dispatcher_name"].fillna("Unassigned")
+                
+                # Filters
+                col1, col2 = st.columns(2)
+                truck_opts = ["All"] + sorted(income_detail["truck_number"].dropna().unique().tolist())
+                chosen_truck = col1.selectbox("Filter by Truck", truck_opts, key="income_truck_filter")
+                
+                disp_opts = ["All"] + sorted(income_detail["dispatcher_name"].dropna().unique().tolist())
+                chosen_disp = col2.selectbox("Filter by Dispatcher", disp_opts, key="income_disp_filter")
+
+                df_filtered = income_detail.copy()
+                if chosen_truck != "All":
+                    df_filtered = df_filtered[df_filtered["truck_number"] == chosen_truck]
+                if chosen_disp != "All":
+                    df_filtered = df_filtered[df_filtered["dispatcher_name"] == chosen_disp]
+
+                if df_filtered.empty:
+                    st.info("No matching income records.")
+                else:
+                    st.subheader("Income Details")
+                    display_cols = [
+                        "date", "truck_number", "dispatcher_name", "amount", 
+                        "load_number", "pickup_location", "delivery_location",
+                        "loaded_miles", "empty_miles"
+                    ]
+                    df_display = df_filtered[display_cols].copy()
+                    df_display.rename(columns={
+                        "date": "Date",
+                        "truck_number": "Truck",
+                        "dispatcher_name": "Dispatcher",
+                        "amount": "Amount",
+                        "load_number": "Load #",
+                        "pickup_location": "Pickup",
+                        "delivery_location": "Delivery",
+                        "loaded_miles": "Loaded Miles",
+                        "empty_miles": "Empty Miles",
+                    }, inplace=True)
+
+                    st.dataframe(
+                        df_display.assign(
+                            Amount=df_display["Amount"].map(_fmt_money)
+                        ),
+                        use_container_width=True,
+                    )
+
+                    total_amount = df_filtered["amount"].sum()
+                    total_loaded = df_filtered["loaded_miles"].sum()
+                    total_empty = df_filtered["empty_miles"].sum()
+                    st.markdown(
+                        f"**Total Income:** {_fmt_money(total_amount)} &nbsp; | &nbsp; "
+                        f"**Total Loaded Miles:** {total_loaded:,.0f} &nbsp; | &nbsp; "
+                        f"**Total Empty Miles:** {total_empty:,.0f}"
+                    )
+
+    # -------------------------------------------
+    # EXPENSE DETAILS
+    # -------------------------------------------
+    elif report_type == "Expense Details":
+        if not has_expenses:
+            st.info("No expenses table found.")
+        else:
+            q_expense_detail = text("""
+                SELECT 
+                    e.date,
+                    e.truck_id,
+                    tr.number AS truck_number,
+                    e.amount,
+                    e.category,
+                    e.description,
+                    disp.name AS dispatcher_name
+                FROM expenses e
+                LEFT JOIN trucks tr ON tr.truck_id = e.truck_id
+                LEFT JOIN assignments a ON a.truck_id = e.truck_id
+                    AND a.start_date <= e.date
+                    AND (a.end_date IS NULL OR a.end_date = '' OR a.end_date >= e.date)
+                LEFT JOIN dispatchers disp ON disp.dispatcher_id = a.dispatcher_id
+                WHERE e.date BETWEEN :start_date AND :end_date
+                ORDER BY e.date DESC, e.truck_id
+            """)
+            expense_detail = safe_read_sql(q_expense_detail, conn, {"start_date": start_date, "end_date": end_date})
+
+            if expense_detail.empty:
+                st.info("No expense records for the selected period.")
+            else:
+                expense_detail["dispatcher_name"] = expense_detail["dispatcher_name"].fillna("Unassigned")
+                
+                # Filters
+                col1, col2, col3 = st.columns(3)
+                truck_opts = ["All"] + sorted(expense_detail["truck_number"].dropna().unique().tolist())
+                chosen_truck = col1.selectbox("Filter by Truck", truck_opts, key="expense_truck_filter")
+                
+                disp_opts = ["All"] + sorted(expense_detail["dispatcher_name"].dropna().unique().tolist())
+                chosen_disp = col2.selectbox("Filter by Dispatcher", disp_opts, key="expense_disp_filter")
+
+                cat_opts = ["All"] + sorted(expense_detail["category"].dropna().unique().tolist())
+                chosen_cat = col3.selectbox("Filter by Category", cat_opts, key="expense_cat_filter")
+
+                df_filtered = expense_detail.copy()
+                if chosen_truck != "All":
+                    df_filtered = df_filtered[df_filtered["truck_number"] == chosen_truck]
+                if chosen_disp != "All":
+                    df_filtered = df_filtered[df_filtered["dispatcher_name"] == chosen_disp]
+                if chosen_cat != "All":
+                    df_filtered = df_filtered[df_filtered["category"] == chosen_cat]
+
+                if df_filtered.empty:
+                    st.info("No matching expense records.")
+                else:
+                    st.subheader("Expense Details")
+                    display_cols = [
+                        "date", "truck_number", "dispatcher_name", "category", "amount", "description"
+                    ]
+                    df_display = df_filtered[display_cols].copy()
+                    df_display.rename(columns={
+                        "date": "Date",
+                        "truck_number": "Truck",
+                        "dispatcher_name": "Dispatcher",
+                        "category": "Category",
+                        "amount": "Amount",
+                        "description": "Description",
+                    }, inplace=True)
+
+                    st.dataframe(
+                        df_display.assign(
+                            Amount=df_display["Amount"].map(_fmt_money)
+                        ),
+                        use_container_width=True,
+                    )
+
+                    total_amount = df_filtered["amount"].sum()
+                    st.markdown(f"**Total Expenses:** {_fmt_money(total_amount)}")
+
+    # -------------------------------------------
+    # LOAN DETAILS
+    # -------------------------------------------
+    elif report_type == "Loan Details":
+        if not has_loans_hist:
+            st.info("No loans_history table found.")
+        else:
+            q_loan_detail = text("""
+                SELECT 
+                    lh.date,
+                    lh.truck_id,
+                    tr.number AS truck_number,
+                    lh.amount,
+                    lh.type,
+                    d.name AS dispatcher_name
+                FROM loans_history lh
+                LEFT JOIN trucks tr ON tr.truck_id = lh.truck_id
+                LEFT JOIN dispatchers d ON d.dispatcher_id = lh.dispatcher_id
+                WHERE lh.date BETWEEN :start_date AND :end_date
+                ORDER BY lh.date DESC, lh.truck_id
+            """)
+            loan_detail = safe_read_sql(q_loan_detail, conn, {"start_date": start_date, "end_date": end_date})
+
+            if loan_detail.empty:
+                st.info("No loan records for the selected period.")
+            else:
+                loan_detail["dispatcher_name"] = loan_detail["dispatcher_name"].fillna("Unassigned")
+                
+                # Filters
+                col1, col2, col3 = st.columns(3)
+                truck_opts = ["All"] + sorted(loan_detail["truck_number"].dropna().unique().tolist())
+                chosen_truck = col1.selectbox("Filter by Truck", truck_opts, key="loan_truck_filter")
+                
+                disp_opts = ["All"] + sorted(loan_detail["dispatcher_name"].dropna().unique().tolist())
+                chosen_disp = col2.selectbox("Filter by Dispatcher", disp_opts, key="loan_disp_filter")
+
+                type_opts = ["All", "given", "returned"]
+                chosen_type = col3.selectbox("Filter by Type", type_opts, key="loan_type_filter")
+
+                df_filtered = loan_detail.copy()
+                if chosen_truck != "All":
+                    df_filtered = df_filtered[df_filtered["truck_number"] == chosen_truck]
+                if chosen_disp != "All":
+                    df_filtered = df_filtered[df_filtered["dispatcher_name"] == chosen_disp]
+                if chosen_type != "All":
+                    df_filtered = df_filtered[df_filtered["type"] == chosen_type]
+
+                if df_filtered.empty:
+                    st.info("No matching loan records.")
+                else:
+                    st.subheader("Loan Details")
+                    display_cols = ["date", "truck_number", "dispatcher_name", "type", "amount"]
+                    df_display = df_filtered[display_cols].copy()
+                    df_display.rename(columns={
+                        "date": "Date",
+                        "truck_number": "Truck",
+                        "dispatcher_name": "Dispatcher",
+                        "type": "Type",
+                        "amount": "Amount",
+                    }, inplace=True)
+
+                    st.dataframe(
+                        df_display.assign(
+                            Amount=df_display["Amount"].map(_fmt_money)
+                        ),
+                        use_container_width=True,
+                    )
+
+                    total_given = df_filtered[df_filtered["type"] == "given"]["amount"].sum()
+                    total_returned = df_filtered[df_filtered["type"] == "returned"]["amount"].sum()
+                    net_loans = total_given - total_returned
+                    st.markdown(
+                        f"**Total Given:** {_fmt_money(total_given)} &nbsp; | &nbsp; "
+                        f"**Total Returned:** {_fmt_money(total_returned)} &nbsp; | &nbsp; "
+                        f"**Net Loans:** {_fmt_money(net_loans)}"
+                    )
+
+    # -------------------------------------------
+    # TRUCK TIMELINE
+    # -------------------------------------------
+    elif report_type == "Truck Timeline":
+        st.subheader("Truck Timeline")
+        
+        if trucks_df.empty:
+            st.info("No trucks found.")
+        else:
+            truck_opts = sorted(trucks_df["number"].dropna().unique().tolist())
+            chosen_truck_num = st.selectbox("Select Truck", truck_opts, key="timeline_truck")
+            
+            truck_id = trucks_df[trucks_df["number"] == chosen_truck_num]["truck_id"].iloc[0]
+
+            # Get all events for this truck
+            events = []
+
+            # Income events
+            if has_income:
+                q_inc_events = text("""
+                    SELECT date, 'Income' AS event_type, amount, load_number AS detail
+                    FROM income
+                    WHERE truck_id = :truck_id AND date BETWEEN :start_date AND :end_date
+                    ORDER BY date
+                """)
+                inc_events = safe_read_sql(q_inc_events, conn, {
+                    "truck_id": truck_id, 
+                    "start_date": start_date, 
+                    "end_date": end_date
                 })
+                if not inc_events.empty:
+                    events.append(inc_events)
 
-    # Fallback: current trailer->truck mapping
-    current_trailer_to_truck = {}
-    if has_trailers and column_exists("trailers","truck_id"):
-        df_tr_now = safe_read_sql("SELECT trailer_id, truck_id FROM trailers;", conn)
-        if df_tr_now is not None:
-            for _, r in df_tr_now.iterrows():
-                if pd.notna(r["truck_id"]):
-                    current_trailer_to_truck[int(r["trailer_id"])] = int(r["truck_id"])
+            # Expense events
+            if has_expenses:
+                q_exp_events = text("""
+                    SELECT date, 'Expense' AS event_type, amount, category AS detail
+                    FROM expenses
+                    WHERE truck_id = :truck_id AND date BETWEEN :start_date AND :end_date
+                    ORDER BY date
+                """)
+                exp_events = safe_read_sql(q_exp_events, conn, {
+                    "truck_id": truck_id,
+                    "start_date": start_date,
+                    "end_date": end_date
+                })
+                if not exp_events.empty:
+                    events.append(exp_events)
 
-    # Build truck number map
-    truck_num_map = dict(zip(trucks_df.truck_id, trucks_df.number)) if not trucks_df.empty else {}
+            # Loan events
+            if has_loans_hist:
+                q_loan_events = text("""
+                    SELECT date, 'Loan' AS event_type, amount, type AS detail
+                    FROM loans_history
+                    WHERE truck_id = :truck_id AND date BETWEEN :start_date AND :end_date
+                    ORDER BY date
+                """)
+                loan_events = safe_read_sql(q_loan_events, conn, {
+                    "truck_id": truck_id,
+                    "start_date": start_date,
+                    "end_date": end_date
+                })
+                if not loan_events.empty:
+                    events.append(loan_events)
 
-    # Pro-rate loans by day within [start_date, end_date]
-    prorated_rows = []
-    if df_loans is not None and not df_loans.empty:
-        for _, r in df_loans.iterrows():
-            et = str(r.get("entity_type") or "").lower()
-            eid = r.get("entity_id")
-            monthly = float(r.get("monthly_amount", 0) or 0.0)
-            ls = _to_date(r.get("s"), date(1900,1,1))
-            le = _to_date(r.get("e"), date(9999,12,31))
-            if eid is None:
-                continue
+            if not events:
+                st.info("No events found for this truck in the selected period.")
+            else:
+                timeline_df = pd.concat(events, ignore_index=True)
+                timeline_df = timeline_df.sort_values("date", ascending=False)
+                
+                timeline_df.rename(columns={
+                    "date": "Date",
+                    "event_type": "Event Type",
+                    "amount": "Amount",
+                    "detail": "Detail"
+                }, inplace=True)
 
-            os = max(start_date, ls)
-            oe = min(end_date, le)
-            if os > oe:
-                continue
+                st.dataframe(
+                    timeline_df.assign(
+                        Amount=timeline_df["Amount"].map(_fmt_money)
+                    ),
+                    use_container_width=True,
+                )
 
-            daily = monthly / MONTHLY_TO_DAILY_DIVISOR
-            amount_for_window = daily * _days_between(os, oe)
+    # -------------------------------------------
+    # DISPATCHER PERFORMANCE
+    # -------------------------------------------
+    elif report_type == "Dispatcher Performance":
+        st.subheader("Dispatcher Performance")
+        
+        if not has_dispatchers or not has_assignments:
+            st.info("Dispatcher assignments not available.")
+        else:
+            # Get all dispatchers
+            q_dispatchers = text("SELECT dispatcher_id, name FROM dispatchers ORDER BY name")
+            dispatchers = safe_read_sql(q_dispatchers, conn)
 
-            if et == "truck":
-                prorated_rows.append({"truck_id": int(eid), "loan_amount": amount_for_window})
+            if dispatchers.empty:
+                st.info("No dispatchers found.")
+            else:
+                perf_data = []
+                
+                for _, disp_row in dispatchers.iterrows():
+                    disp_id = disp_row["dispatcher_id"]
+                    disp_name = disp_row["name"]
 
-            elif et == "trailer":
-                tr_id = int(eid)
-                if hist_rows:
-                    trailer_assigns = [h for h in hist_rows if h["trailer_id"] == tr_id]
-                    if not trailer_assigns:
-                        t_truck = current_trailer_to_truck.get(tr_id)
-                        if t_truck is not None:
-                            prorated_rows.append({"truck_id": int(t_truck), "loan_amount": amount_for_window})
+                    # Get trucks assigned to this dispatcher during the period
+                    q_assigned_trucks = text("""
+                        SELECT DISTINCT a.truck_id
+                        FROM assignments a
+                        WHERE a.dispatcher_id = :disp_id
+                          AND a.start_date <= :end_date
+                          AND (a.end_date IS NULL OR a.end_date = '' OR a.end_date >= :start_date)
+                    """)
+                    assigned = safe_read_sql(q_assigned_trucks, conn, {
+                        "disp_id": disp_id,
+                        "start_date": start_date,
+                        "end_date": end_date
+                    })
+
+                    if assigned.empty:
                         continue
 
-                    total_assign_days = 0
-                    portions = []
-                    for a in trailer_assigns:
-                        as_ = max(os, a["s"])
-                        ae_ = min(oe, a["e"])
-                        if as_ <= ae_:
-                            d = _days_between(as_, ae_)
-                            portions.append((a["truck_id"], d))
-                            total_assign_days += d
+                    truck_ids = assigned["truck_id"].tolist()
+                    truck_ids_str = ",".join([str(t) for t in truck_ids])
 
-                    if total_assign_days == 0:
-                        t_truck = current_trailer_to_truck.get(tr_id)
-                        if t_truck is not None:
-                            prorated_rows.append({"truck_id": int(t_truck), "loan_amount": amount_for_window})
-                    else:
-                        for t_id, d in portions:
-                            share = amount_for_window * (d / total_assign_days)
-                            prorated_rows.append({"truck_id": int(t_id), "loan_amount": share})
+                    # Income for these trucks during assignment
+                    total_income = 0.0
+                    if has_income:
+                        q_inc = text(f"""
+                            SELECT COALESCE(SUM(i.amount), 0) AS total
+                            FROM income i
+                            JOIN assignments a ON a.truck_id = i.truck_id
+                                AND a.dispatcher_id = :disp_id
+                                AND a.start_date <= i.date
+                                AND (a.end_date IS NULL OR a.end_date = '' OR a.end_date >= i.date)
+                            WHERE i.date BETWEEN :start_date AND :end_date
+                        """)
+                        inc_result = safe_read_sql(q_inc, conn, {
+                            "disp_id": disp_id,
+                            "start_date": start_date,
+                            "end_date": end_date
+                        })
+                        if not inc_result.empty:
+                            total_income = float(inc_result.iloc[0]["total"])
+
+                    # Expenses
+                    total_expenses = 0.0
+                    if has_expenses:
+                        q_exp = text(f"""
+                            SELECT COALESCE(SUM(e.amount), 0) AS total
+                            FROM expenses e
+                            JOIN assignments a ON a.truck_id = e.truck_id
+                                AND a.dispatcher_id = :disp_id
+                                AND a.start_date <= e.date
+                                AND (a.end_date IS NULL OR a.end_date = '' OR a.end_date >= e.date)
+                            WHERE e.date BETWEEN :start_date AND :end_date
+                        """)
+                        exp_result = safe_read_sql(q_exp, conn, {
+                            "disp_id": disp_id,
+                            "start_date": start_date,
+                            "end_date": end_date
+                        })
+                        if not exp_result.empty:
+                            total_expenses = float(exp_result.iloc[0]["total"])
+
+                    # Loans
+                    total_loans = 0.0
+                    if has_loans_hist:
+                        q_loans = text("""
+                            SELECT amount, type
+                            FROM loans_history
+                            WHERE dispatcher_id = :disp_id
+                              AND date BETWEEN :start_date AND :end_date
+                        """)
+                        loans_result = safe_read_sql(q_loans, conn, {
+                            "disp_id": disp_id,
+                            "start_date": start_date,
+                            "end_date": end_date
+                        })
+                        if not loans_result.empty:
+                            for _, lr in loans_result.iterrows():
+                                amt = float(lr["amount"]) if lr["amount"] else 0.0
+                                if lr["type"] == "given":
+                                    total_loans += amt
+                                elif lr["type"] == "returned":
+                                    total_loans -= amt
+
+                    profit = total_income - total_expenses - total_loans
+                    profit_margin = (profit / total_income * 100.0) if total_income else 0.0
+
+                    perf_data.append({
+                        "Dispatcher": disp_name,
+                        "Trucks Managed": len(truck_ids),
+                        "Total Income": total_income,
+                        "Total Expenses": total_expenses,
+                        "Total Loans": total_loans,
+                        "Profit": profit,
+                        "Profit Margin %": profit_margin,
+                    })
+
+                if not perf_data:
+                    st.info("No dispatcher performance data for the selected period.")
                 else:
-                    t_truck = current_trailer_to_truck.get(tr_id)
-                    if t_truck is not None:
-                        prorated_rows.append({"truck_id": int(t_truck), "loan_amount": amount_for_window})
-
-    if prorated_rows:
-        loans_df = pd.DataFrame(prorated_rows).groupby("truck_id", as_index=False)["loan_amount"].sum()
-        loans_df["truck_number"] = loans_df["truck_id"].map(truck_num_map)
-    else:
-        loans_df = pd.DataFrame(columns=["truck_id","loan_amount","truck_number"])
-
-    # --------------------------------------------------
-    # Merge Summary (truck + dispatcher), then display
-    # --------------------------------------------------
-    # Ensure dispatcher cols exist for merging
-    for df_ in [income_df, expense_df]:
-        if "dispatcher_id" not in df_.columns:
-            df_["dispatcher_id"] = None
-        if "dispatcher_name" not in df_.columns:
-            df_["dispatcher_name"] = None
-        if "truck_number" not in df_.columns:
-            df_["truck_number"] = df_["truck_id"].map(truck_num_map)
-
-    def _merge(a, b, on, how="outer"):
-        if a is None or a.empty:
-            return b.copy() if b is not None else pd.DataFrame()
-        if b is None or b.empty:
-            return a.copy()
-        return a.merge(b, on=on, how=how)
-
-    common_keys = ["truck_id","truck_number","dispatcher_id","dispatcher_name"]
-    summary = _merge(income_df, expense_df, on=common_keys)
-
-    # Loans are truck-level; attach to each dispatcher row for that truck
-    if summary is not None and not summary.empty:
-        loans_for_merge = summary[["truck_id","truck_number"]].drop_duplicates().merge(
-            loans_df[["truck_id","truck_number","loan_amount"]], on=["truck_id","truck_number"], how="left"
-        )
-        loans_for_merge = summary[common_keys].drop_duplicates().merge(
-            loans_df[["truck_id","truck_number","loan_amount"]], on=["truck_id","truck_number"], how="left"
-        )
-        summary = _merge(summary, loans_for_merge, on=common_keys)
-    else:
-        # If no summary rows, still make a base from trucks + loans
-        summary = trucks_df.rename(columns={"number":"truck_number"})[["truck_id","truck_number"]].copy()
-        summary["dispatcher_id"] = None
-        summary["dispatcher_name"] = None
-        summary = summary.merge(loans_df[["truck_id","truck_number","loan_amount"]], on=["truck_id","truck_number"], how="left")
-
-    # Fill numeric defaults
-    for c in ["total_income","total_expenses","loan_amount"]:
-        if c not in summary.columns:
-            summary[c] = 0.0
-        summary[c] = pd.to_numeric(summary[c], errors="coerce").fillna(0.0)
-
-    summary["total_costs"] = summary["total_expenses"] + summary["loan_amount"]
-    summary["profit_loss"] = summary["total_income"] - summary["total_costs"]
-    # Attach trailer by current mapping (history already used for loans)
-    summary["trailer_number"] = summary["truck_id"].map(trailer_map).fillna("Not Assigned")
-
-    # Dispatcher map for display when missing dispatcher_name
-    dispatcher_map = get_dispatcher_map(conn)
-    summary["dispatcher_name"] = summary["dispatcher_name"].fillna(summary["truck_id"].map(dispatcher_map))
-
-    st.subheader("Per-Truck Summary (Income, Expenses, Loans, Dispatcher-aware)")
-    if summary.empty:
-        st.info("No data for the selected range.")
-    else:
-        disp = summary[[
-        "truck_number",
-        "trailer_number",
-        "dispatcher_name",
-        "total_income",
-        "total_expenses",
-        "loan_amount",
-        "total_costs",
-        "profit_loss"
-        ]].copy()
-        for c in ["total_income","total_expenses","loan_amount","total_costs","profit_loss"]:
-            disp[c] = disp[c].apply(_fmt_money)
-
-        # Top totals
-        st.metric("All Trucks - Total Income", _fmt_money(summary["total_income"].sum()))
-        st.metric("All Trucks - Total Expenses", _fmt_money(summary["total_expenses"].sum()))
-        st.metric("All Trucks - Total Loans (Prorated)", _fmt_money(summary["loan_amount"].sum()))
-        st.metric("All Trucks - Profit/Loss", _fmt_money(summary["profit_loss"].sum()))
-        st.dataframe(disp.sort_values("truck_number"), use_container_width=True)
-
-    # ---------------------------------------
-    # Profit / Loss per Truck (roll-up)
-    # ---------------------------------------
-    st.subheader("Profit / Loss per Truck (Includes Prorated Loans)")
-    if summary.empty:
-        st.info("No data to display.")
-    else:
-        perf = summary.groupby(["truck_number"], as_index=False).agg(
-            total_income=("total_income","sum"),
-            total_expenses=("total_expenses","sum"),
-            loan_amount=("loan_amount","sum"),
-            profit_after_loans=("profit_loss","sum"),
-        )
-        for c in ["total_income","total_expenses","loan_amount","profit_after_loans"]:
-            perf[c] = perf[c].apply(_fmt_money)
-
-        st.metric("All Trucks - Profit After Loans", _fmt_money(summary["profit_loss"].sum()))
-        st.dataframe(perf.sort_values("profit_after_loans", ascending=False), use_container_width=True)
-        export_buttons(perf, "profit_loss_per_truck", "Profit-Loss per Truck Report")
-
-    # ---------------------------------------
-    # Category Breakdown per Truck (Loans as expenses)
-    # ---------------------------------------
-    st.subheader("Category Breakdown per Truck (Loans treated as expenses)")
-    cat_df = pd.DataFrame(columns=["truck_id","category","total"])
-    if has_expenses:
-        cat_df = safe_read_sql(
-            """
-            SELECT truck_id, category, COALESCE(SUM(amount), 0) AS total
-            FROM expenses
-            WHERE DATE(date) BETWEEN DATE(?) AND DATE(?)
-            GROUP BY truck_id, category
-            """,
-            conn,
-            params=[start_date.isoformat(), end_date.isoformat()],
-        )
-
-    # Attach pseudo-categories for loans
-    if loans_df is not None and not loans_df.empty:
-        add_rows = []
-        for _, row in loans_df.iterrows():
-            tid = row["truck_id"]
-            total_loan = float(row.get("loan_amount", 0.0) or 0.0)
-            if total_loan:
-                add_rows.append({"truck_id": tid, "category": "Loans (Prorated)", "total": total_loan})
-        if add_rows:
-            loans_cat_df = pd.DataFrame(add_rows)
-            cat_df = pd.concat([cat_df, loans_cat_df], ignore_index=True)
-
-    if trucks_df.empty:
-        st.info("No trucks found.")
-    else:
-        # Create dropdown for truck selection (no "All Trucks" option)
-        truck_options = [f"Truck {row['number']}" for _, row in trucks_df.sort_values("number").iterrows()]
-        selected_truck_cat = st.selectbox("Select Truck for Category Breakdown", truck_options, key="cat_breakdown_truck_select")
-        
-        by_truck = cat_df.groupby("truck_id")
-        
-        # Show only selected truck
-        truck_num = selected_truck_cat.replace("Truck ", "")
-        trow = trucks_df[trucks_df["number"] == truck_num].iloc[0]
-        tid = trow["truck_id"]
-        tnum = trow["number"]
-        
-        sub = by_truck.get_group(tid) if tid in by_truck.indices else pd.DataFrame(columns=["category","total"])
-        sub_display = sub[["category","total"]].rename(columns={"category":"Category","total":"Amount"})
-        st.metric("Total Amount", _fmt_money(pd.to_numeric(sub_display["Amount"], errors="coerce").fillna(0.0).sum()))
-        if not sub_display.empty:
-            st.dataframe(sub_display.sort_values("Amount", ascending=False), use_container_width=True)
-            export_buttons(sub_display, f"truck_{tnum}_category_breakdown", f"Truck {tnum} Category Breakdown")
-        else:
-            st.write("No expenses for this truck in the selected range.")
-
-
-    # ---------------------------------------
-    # Per-Truck Expense Breakdown with Deletes
-    # ---------------------------------------
-    st.subheader("Per-Truck Expense Breakdown with Delete Actions")
-    exp_df = safe_read_sql(
-        """
-        SELECT e.expense_id, e.truck_id, t.number AS truck_number,
-               e.category, e.amount, e.date, e.description
-        FROM expenses e
-        LEFT JOIN trucks t ON e.truck_id = t.truck_id
-        WHERE DATE(e.date) BETWEEN DATE(?) AND DATE(?)
-        ORDER BY e.date DESC, e.expense_id DESC
-        """,
-        conn,
-        params=[start_date.isoformat(), end_date.isoformat()],
-    )
-
-    if not exp_df.empty:
-        total_expenses_all = pd.to_numeric(exp_df["amount"], errors="coerce").fillna(0.0).sum()
-        st.metric("All Trucks - Total Expenses (Selected Range)", _fmt_money(total_expenses_all))
-
-    if exp_df.empty:
-        st.info("No expenses in selected range.")
-    else:
-        # Create dropdown for truck selection (no "All Trucks" option)
-        truck_list = sorted(exp_df["truck_number"].unique())
-        truck_options_exp = [f"Truck {tnum}" for tnum in truck_list]
-        selected_truck_exp = st.selectbox("Select Truck for Expense Breakdown", truck_options_exp, key="exp_breakdown_truck_select")
-        
-        # Show only selected truck
-        truck_num = selected_truck_exp.replace("Truck ", "")
-        group = exp_df[exp_df["truck_number"] == truck_num]
-        
-        truck_total = pd.to_numeric(group["amount"], errors="coerce").fillna(0.0).sum()
-        st.metric("Truck Total", _fmt_money(truck_total))
-
-        def render_row(r):
-            cols = st.columns([2, 2, 2, 2, 4, 2])
-            cols[0].write(r["date"])
-            cols[1].write(r["category"])
-            cols[2].write(_fmt_money(r["amount"]))
-            cols[3].write(r.get("description", "") or "")
-            cols[4].write(f"Expense ID: {int(r['expense_id'])}")
-            if cols[5].button("Delete", key=f"del_exp_{int(r['expense_id'])}"):
-                try:
-                    conn_del = get_db_connection()
-                    conn_del.execute("DELETE FROM expenses WHERE expense_id = ?", (int(r["expense_id"]),))
-                    conn_del.commit()
-                    conn_del.close()
-                    st.success(f"Deleted expense {int(r['expense_id'])}")
-                    safe_rerun()
-                except Exception as e:
-                    st.error(f"Failed to delete expense {int(r['expense_id'])}: {e}")
-
-        header_cols = st.columns([2, 2, 2, 2, 4, 2])
-        header_cols[0].markdown("**Date**")
-        header_cols[1].markdown("**Category**")
-        header_cols[2].markdown("**Amount**")
-        header_cols[3].markdown("**Description**")
-        header_cols[4].markdown("**Info**")
-        header_cols[5].markdown("**Action**")
-
-        for _, r in group.iterrows():
-            render_row(r)
-        export_buttons(group, f"truck_{truck_num}_expenses", f"Truck {truck_num} Expenses Report")
-
-    # ---------------------------------------
-    # Fuel Discounts by Truck (KEEP structure)
-    # ---------------------------------------
-    st.subheader("Fuel Discounts by Truck")
-    start_str = start_date.isoformat()
-    end_str = end_date.isoformat()
-
-    fuel_df = safe_read_sql(
-        """
-        SELECT 
-            t.number AS truck_label,
-            SUM(
-                COALESCE(
-                    CAST(json_extract(e.metadata, '$.discount_amount') AS REAL),
-                    0
-                )
-            ) AS total_discount
-        FROM trucks t
-        LEFT JOIN expenses e 
-            ON t.truck_id = e.truck_id
-            AND DATE(e.date) BETWEEN DATE(?) AND DATE(?)
-            AND LOWER(e.category) LIKE '%fuel%'
-        GROUP BY t.number
-        ORDER BY total_discount DESC;
-        """,
-        conn,
-        params=[start_str, end_str],
-    )
-
-    if fuel_df is None or fuel_df.empty:
-        st.info("No fuel discounts found in the selected range.")
-    else:
-        total_fuel_disc = pd.to_numeric(fuel_df["total_discount"], errors="coerce").fillna(0.0).sum()
-        st.metric("All Trucks - Total Fuel Discounts", _fmt_money(total_fuel_disc))
-        out = fuel_df.rename(columns={"truck_label": "Truck", "total_discount": "Fuel Discount Total"})
-        st.dataframe(out.sort_values("Fuel Discount Total", ascending=False), use_container_width=True)
-        export_buttons(out, "fuel_discounts", "Fuel Discounts Report")
-
-    st.divider()
-    st.header("📊 Performance Charts")
-    st.caption("Visual analytics for income, expenses, profit, and performance metrics")
-
-    # Date selector for charts
-    col_chart1, col_chart2 = st.columns([2, 1])
-    with col_chart1:
-        chart_end_date = st.date_input(
-            "Select end date for 12-week analysis",
-            value=datetime.now().date(),
-            key="chart_end_date"
-        )
-    with col_chart2:
-        st.metric("Weeks Back", "12", help="Charts show 12 weeks of data ending on selected date")
-
-    # Calculate start date (12 weeks back from selected date)
-    chart_start_date = chart_end_date - timedelta(weeks=12)
-
-    st.caption(f"Showing data from {chart_start_date} to {chart_end_date}")
-
-    # Fetch data for all charts
-    conn_charts = get_db_connection()
-
-    # Get weekly income data
-    df_income_weekly = pd.read_sql_query("""
-        SELECT 
-            strftime('%Y-%W', date) as week,
-            date(date, 'weekday 0', '-6 days') as week_start,
-            SUM(amount) as total_income
-        FROM income
-        WHERE date BETWEEN ? AND ?
-        GROUP BY week
-        ORDER BY week
-    """, conn_charts, params=(chart_start_date, chart_end_date))
-
-    # Get weekly expense data
-    df_expense_weekly = pd.read_sql_query("""
-        SELECT 
-            strftime('%Y-%W', date) as week,
-            date(date, 'weekday 0', '-6 days') as week_start,
-            SUM(amount) as total_expense
-        FROM expenses
-        WHERE date BETWEEN ? AND ?
-        GROUP BY week
-        ORDER BY week
-    """, conn_charts, params=(chart_start_date, chart_end_date))
-
-    # Get weekly data by dispatcher
-    df_dispatcher_weekly = pd.read_sql_query("""
-        SELECT
-            strftime('%Y-%W', i.date) as week,
-            date(i.date, 'weekday 0', '-6 days') as week_start,
-            COALESCE(d.name, 'Unassigned') as dispatcher,
-            SUM(i.amount) as total_income
-        FROM income i
-        LEFT JOIN trucks t ON i.truck_id = t.truck_id
-        LEFT JOIN dispatchers d ON t.dispatcher_id = d.dispatcher_id
-        WHERE i.date BETWEEN ? AND ?
-        GROUP BY week, dispatcher
-        ORDER BY week, dispatcher
-    """, conn_charts, params=(chart_start_date, chart_end_date))
-
-    # Get weekly RPM data (Rate Per Mile)
-    df_rpm_weekly = pd.read_sql_query("""
-        SELECT 
-            strftime('%Y-%W', date) as week,
-            date(date, 'weekday 0', '-6 days') as week_start,
-            SUM(amount) as total_income,
-            SUM(COALESCE(loaded_miles, 0) + COALESCE(empty_miles, 0)) as total_miles
-        FROM income
-        WHERE date BETWEEN ? AND ?
-        GROUP BY week
-        ORDER BY week
-    """, conn_charts, params=(chart_start_date, chart_end_date))
-
-    # Calculate RPM
-    df_rpm_weekly['rpm'] = df_rpm_weekly.apply(
-        lambda row: row['total_income'] / row['total_miles'] if row['total_miles'] > 0 else 0,
-        axis=1
-    )
-
-    # Get weekly fuel data (total and by truck)
-    df_fuel_weekly = pd.read_sql_query("""
-        SELECT
-            strftime('%Y-%W', e.date) as week,
-            date(e.date, 'weekday 0', '-6 days') as week_start,
-            e.truck_id,
-            CAST(e.truck_id AS TEXT) as truck_number,
-            SUM(CASE WHEN e.category = 'Fuel' THEN e.gallons ELSE 0 END) as total_gallons
-        FROM expenses e
-        WHERE e.date BETWEEN ? AND ?
-        GROUP BY week, e.truck_id
-        ORDER BY week, e.truck_id
-    """, conn_charts, params=(chart_start_date, chart_end_date))
-
-    # Get weekly miles by truck
-    df_miles_weekly = pd.read_sql_query("""
-        SELECT 
-            strftime('%Y-%W', date) as week,
-            date(date, 'weekday 0', '-6 days') as week_start,
-            truck_id,
-            SUM(COALESCE(loaded_miles, 0) + COALESCE(empty_miles, 0)) as total_miles
-        FROM income
-        WHERE date BETWEEN ? AND ?
-        GROUP BY week, truck_id
-        ORDER BY week, truck_id
-    """, conn_charts, params=(chart_start_date, chart_end_date))
-
-    conn_charts.close()
-
-    # Chart 1: Income vs Expenses
-    st.subheader("💰 Income vs Expenses (12 Weeks)")
-
-    if not df_income_weekly.empty or not df_expense_weekly.empty:
-        # Merge income and expense data
-        df_income_expense = pd.merge(
-            df_income_weekly[['week', 'week_start', 'total_income']], 
-            df_expense_weekly[['week', 'total_expense']], 
-            on='week', 
-            how='outer'
-        ).fillna(0)
-    
-        # Format week labels
-        df_income_expense['week_label'] = pd.to_datetime(df_income_expense['week_start']).dt.strftime('%b %d')
-    
-        fig1 = go.Figure()
-    
-        fig1.add_trace(go.Scatter(
-            x=df_income_expense['week_label'],
-            y=df_income_expense['total_income'],
-            mode='lines+markers',
-            name='Income',
-            line=dict(color='green', width=3),
-            marker=dict(size=8)
-        ))
-    
-        fig1.add_trace(go.Scatter(
-            x=df_income_expense['week_label'],
-            y=df_income_expense['total_expense'],
-            mode='lines+markers',
-            name='Expenses',
-            line=dict(color='red', width=3),
-            marker=dict(size=8)
-        ))
-    
-        fig1.update_layout(
-            title="Weekly Income vs Expenses",
-            xaxis_title="Week Starting",
-            yaxis_title="Amount ($)",
-            hovermode='x unified',
-            height=400
-        )
-    
-        st.plotly_chart(fig1, use_container_width=True)
-    else:
-        st.info("No income or expense data available for the selected period")
-
-    # Chart 2: Profit per Week
-    st.subheader("📈 Profit per Week (12 Weeks)")
-
-    if not df_income_weekly.empty or not df_expense_weekly.empty:
-        # Calculate profit
-        df_profit = pd.merge(
-            df_income_weekly[['week', 'week_start', 'total_income']], 
-            df_expense_weekly[['week', 'total_expense']], 
-            on='week', 
-            how='outer'
-        ).fillna(0)
-    
-        df_profit['profit'] = df_profit['total_income'] - df_profit['total_expense']
-        df_profit['week_label'] = pd.to_datetime(df_profit['week_start']).dt.strftime('%b %d')
-    
-        fig2 = go.Figure()
-    
-        fig2.add_trace(go.Scatter(
-            x=df_profit['week_label'],
-            y=df_profit['profit'],
-            mode='lines+markers',
-            name='Profit',
-            line=dict(color='blue', width=3),
-            marker=dict(size=8),
-            fill='tozeroy',
-            fillcolor='rgba(0, 100, 255, 0.1)'
-        ))
-    
-        # Add zero line
-        fig2.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
-    
-        fig2.update_layout(
-            title="Weekly Profit",
-            xaxis_title="Week Starting",
-            yaxis_title="Profit ($)",
-            hovermode='x unified',
-            height=400
-        )
-    
-        st.plotly_chart(fig2, use_container_width=True)
-    else:
-        st.info("No profit data available for the selected period")
-
-    # Chart 3: Income by Dispatcher
-    st.subheader("👥 Income by Dispatcher (12 Weeks)")
-
-    if not df_dispatcher_weekly.empty:
-        # Pivot data for multiple lines
-        df_dispatcher_pivot = df_dispatcher_weekly.pivot(
-            index='week_start', 
-            columns='dispatcher', 
-            values='total_income'
-        ).fillna(0)
-    
-        # Format week labels
-        df_dispatcher_pivot.index = pd.to_datetime(df_dispatcher_pivot.index).strftime('%b %d')
-    
-        fig3 = go.Figure()
-    
-        # Add a line for each dispatcher
-        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f']
-        for idx, dispatcher in enumerate(df_dispatcher_pivot.columns):
-            fig3.add_trace(go.Scatter(
-                x=df_dispatcher_pivot.index,
-                y=df_dispatcher_pivot[dispatcher],
-                mode='lines+markers',
-                name=dispatcher,
-                line=dict(width=3, color=colors[idx % len(colors)]),
-                marker=dict(size=8)
-            ))
-    
-        fig3.update_layout(
-            title="Weekly Income by Dispatcher",
-            xaxis_title="Week Starting",
-            yaxis_title="Income ($)",
-            hovermode='x unified',
-            height=400,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-        )
-    
-        st.plotly_chart(fig3, use_container_width=True)
-    else:
-        st.info("No dispatcher data available for the selected period")
-
-    # Chart 4: Rate Per Mile (RPM)
-    st.subheader("💵 Rate Per Mile (12 Weeks)")
-
-    if not df_rpm_weekly.empty:
-        df_rpm_weekly['week_label'] = pd.to_datetime(df_rpm_weekly['week_start']).dt.strftime('%b %d')
-    
-        fig4 = go.Figure()
-    
-        fig4.add_trace(go.Scatter(
-            x=df_rpm_weekly['week_label'],
-            y=df_rpm_weekly['rpm'],
-            mode='lines+markers',
-            name='RPM',
-            line=dict(color='purple', width=3),
-            marker=dict(size=8)
-        ))
-    
-        fig4.update_layout(
-            title="Weekly Rate Per Mile (Total Income ÷ Total Miles)",
-            xaxis_title="Week Starting",
-            yaxis_title="Rate Per Mile ($)",
-            hovermode='x unified',
-            height=400
-        )
-    
-        st.plotly_chart(fig4, use_container_width=True)
-    
-        # Show summary stats
-        avg_rpm = df_rpm_weekly['rpm'].mean()
-        st.metric("Average RPM (12 weeks)", f"${avg_rpm:.2f}")
-    else:
-        st.info("No RPM data available for the selected period")
-
-    # Chart 5: Fuel Gallons vs Total Miles
-    st.subheader("⛽ Fuel Consumption vs Miles (12 Weeks)")
-
-    # Truck selector
-    truck_filter_fuel = st.selectbox(
-        "Select Truck (or All)",
-        options=['All Trucks'] + sorted(df_fuel_weekly['truck_number'].dropna().unique().tolist()),
-        key="fuel_truck_filter"
-    )
-
-    if not df_fuel_weekly.empty and not df_miles_weekly.empty:
-        # Filter by truck if selected
-        if truck_filter_fuel != 'All Trucks':
-            selected_truck_id = df_fuel_weekly[df_fuel_weekly['truck_number'] == truck_filter_fuel]['truck_id'].iloc[0]
-            df_fuel_filtered = df_fuel_weekly[df_fuel_weekly['truck_id'] == selected_truck_id]
-            df_miles_filtered = df_miles_weekly[df_miles_weekly['truck_id'] == selected_truck_id]
-        else:
-            # Aggregate all trucks
-            df_fuel_filtered = df_fuel_weekly.groupby(['week', 'week_start']).agg({
-                'total_gallons': 'sum'
-            }).reset_index()
-            df_miles_filtered = df_miles_weekly.groupby(['week', 'week_start']).agg({
-                'total_miles': 'sum'
-            }).reset_index()
-    
-        # Merge fuel and miles
-        df_fuel_miles = pd.merge(
-            df_fuel_filtered[['week', 'week_start', 'total_gallons']], 
-            df_miles_filtered[['week', 'total_miles']], 
-            on='week', 
-            how='outer'
-        ).fillna(0)
-    
-        try:
-            # Filter out invalid dates first
-            df_fuel_miles = df_fuel_miles[df_fuel_miles['week_start'].notna()]
-            df_fuel_miles = df_fuel_miles[df_fuel_miles['week_start'] != '0']
-            df_fuel_miles = df_fuel_miles[df_fuel_miles['week_start'] != 0]
-    
-            # Convert to datetime with error handling
-            df_fuel_miles['week_label'] = pd.to_datetime(df_fuel_miles['week_start'], errors='coerce').dt.strftime('%b %d')
-    
-            # Remove rows where date conversion failed
-            df_fuel_miles = df_fuel_miles[df_fuel_miles['week_label'].notna()]
-        except Exception as e:
-            st.warning(f"Some date values could not be parsed: {e}")
-            df_fuel_miles['week_label'] = df_fuel_miles['week_start'].astype(str)
-    
-        # Create dual-axis chart
-        fig5 = go.Figure()
-    
-        fig5.add_trace(go.Scatter(
-            x=df_fuel_miles['week_label'],
-            y=df_fuel_miles['total_gallons'],
-            mode='lines+markers',
-            name='Fuel (Gallons)',
-            line=dict(color='orange', width=3),
-            marker=dict(size=8),
-            yaxis='y'
-        ))
-    
-        fig5.add_trace(go.Scatter(
-            x=df_fuel_miles['week_label'],
-            y=df_fuel_miles['total_miles'],
-            mode='lines+markers',
-            name='Total Miles',
-            line=dict(color='teal', width=3),
-            marker=dict(size=8),
-            yaxis='y2'
-        ))
-    
-        fig5.update_layout(
-            title=f"Weekly Fuel vs Miles - {truck_filter_fuel}",
-            xaxis_title="Week Starting",
-            yaxis=dict(title="Fuel (Gallons)", side='left', showgrid=False),
-            yaxis2=dict(title="Miles", side='right', overlaying='y', showgrid=False),
-            hovermode='x unified',
-            height=400,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-        )
-    
-        st.plotly_chart(fig5, use_container_width=True)
-    
-        # Calculate MPG
-        total_gallons = df_fuel_miles['total_gallons'].sum()
-        total_miles = df_fuel_miles['total_miles'].sum()
-        if total_gallons > 0:
-            mpg = total_miles / total_gallons
-            st.metric(f"Average MPG - {truck_filter_fuel} (12 weeks)", f"{mpg:.2f}")
-    else:
-        st.info("No fuel or miles data available for the selected period")
-
-    st.markdown("---")
-    st.markdown("### ⛽ Fuel Efficiency by Truck")
-
-    # Date range for fuel report
-    fuel_col1, fuel_col2 = st.columns(2)
-    with fuel_col1:
-        fuel_start = st.date_input("Fuel Report Start Date", value=date.today().replace(month=1, day=1), key="fuel_start")
-    with fuel_col2:
-        fuel_end = st.date_input("Fuel Report End Date", value=date.today(), key="fuel_end")
-
-    if fuel_start > fuel_end:
-        st.error("Start date must be before end date.")
-    else:
-        conn_fuel = get_db_connection()
-        try:
-            # Query fuel expenses with gallons and loaded miles from income
-            fuel_query = """
-            SELECT 
-                e.truck_id,
-                t.number as truck_number,
-                SUM(e.amount) as total_fuel_cost,
-                SUM(e.gallons) as total_gallons,
-                COALESCE(SUM(i.loaded_miles), 0) as total_loaded_miles,
-                COALESCE(SUM(i.empty_miles), 0) as total_empty_miles
-            FROM expenses e
-            LEFT JOIN trucks t ON e.truck_id = t.truck_id
-            LEFT JOIN income i ON e.truck_id = i.truck_id 
-                AND i.date BETWEEN ? AND ?
-            WHERE e.category = 'Fuel'
-                AND e.date BETWEEN ? AND ?
-                AND e.truck_id IS NOT NULL
-            GROUP BY e.truck_id, t.number
-            ORDER BY t.number
-            """
-        
-            df_fuel = pd.read_sql_query(fuel_query, conn_fuel, 
-                                        params=(fuel_start, fuel_end, fuel_start, fuel_end))
-        finally:
-            conn_fuel.close()
-
-        if df_fuel.empty:
-            st.info("No fuel data found for the selected date range.")
-        else:
-            # Calculate metrics
-            df_fuel['total_miles'] = df_fuel['total_loaded_miles'] + df_fuel['total_empty_miles']
-            df_fuel['mpg'] = df_fuel.apply(
-                lambda row: round(row['total_miles'] / row['total_gallons'], 2) 
-                if row['total_gallons'] > 0 else 0, axis=1
-            )
-            df_fuel['cost_per_mile'] = df_fuel.apply(
-                lambda row: round(row['total_fuel_cost'] / row['total_miles'], 2) 
-                if row['total_miles'] > 0 else 0, axis=1
-            )
-            df_fuel['cost_per_gallon'] = df_fuel.apply(
-                lambda row: round(row['total_fuel_cost'] / row['total_gallons'], 2) 
-                if row['total_gallons'] > 0 else 0, axis=1
-            )
-
-            # Display summary metrics
-            st.markdown("#### Fleet Summary")
-            metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
-        
-            with metric_col1:
-                total_fuel_cost = df_fuel['total_fuel_cost'].sum()
-                st.metric("Total Fuel Cost", f"${total_fuel_cost:,.2f}")
-        
-            with metric_col2:
-                total_gallons = df_fuel['total_gallons'].sum()
-                st.metric("Total Gallons", f"{total_gallons:,.2f}")
-        
-            with metric_col3:
-                total_miles = df_fuel['total_miles'].sum()
-                fleet_mpg = round(total_miles / total_gallons, 2) if total_gallons > 0 else 0
-                st.metric("Fleet Average MPG", f"{fleet_mpg}")
-        
-            with metric_col4:
-                fleet_cpm = round(total_fuel_cost / total_miles, 2) if total_miles > 0 else 0
-                st.metric("Fleet Fuel Cost/Mile", f"${fleet_cpm}")
-
-            # Display detailed table
-            st.markdown("#### Per-Truck Fuel Efficiency")
-        
-            display_fuel = df_fuel.copy()
-            display_fuel['truck_number'] = display_fuel['truck_number'].fillna('Unknown')
-            display_fuel['total_fuel_cost'] = display_fuel['total_fuel_cost'].apply(lambda x: f"${x:,.2f}")
-            display_fuel['total_gallons'] = display_fuel['total_gallons'].apply(lambda x: f"{x:,.2f}")
-            display_fuel['total_loaded_miles'] = display_fuel['total_loaded_miles'].apply(lambda x: f"{x:,.0f}")
-            display_fuel['total_empty_miles'] = display_fuel['total_empty_miles'].apply(lambda x: f"{x:,.0f}")
-            display_fuel['total_miles'] = display_fuel['total_miles'].apply(lambda x: f"{x:,.0f}")
-            display_fuel['cost_per_mile'] = display_fuel['cost_per_mile'].apply(lambda x: f"${x:.2f}")
-            display_fuel['cost_per_gallon'] = display_fuel['cost_per_gallon'].apply(lambda x: f"${x:.2f}")
-        
-            display_fuel = display_fuel[[
-                'truck_number', 'total_fuel_cost', 'total_gallons', 
-                'total_loaded_miles', 'total_empty_miles', 'total_miles',
-                'mpg', 'cost_per_mile', 'cost_per_gallon'
-            ]]
-        
-            display_fuel.columns = [
-                'Truck', 'Total Fuel Cost', 'Total Gallons',
-                'Loaded Miles', 'Empty Miles', 'Total Miles',
-                'MPG', 'Cost/Mile', 'Cost/Gallon'
-            ]
-        
-            st.dataframe(display_fuel, use_container_width=True, hide_index=True)
-
-            # Export fuel report
-            st.markdown("#### Export Fuel Report")
-            export_col1, export_col2 = st.columns(2)
-        
-            with export_col1:
-                if st.button("📥 Export to CSV", key="export_fuel_csv"):
-                    csv = df_fuel.to_csv(index=False)
-                    st.download_button(
-                        "Download CSV",
-                        csv,
-                        f"fuel_efficiency_{fuel_start}_{fuel_end}.csv",
-                        "text/csv"
-                    )
-        
-            with export_col2:
-                if st.button("📥 Export to Excel", key="export_fuel_excel"):
-                    output = io.BytesIO()
-                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                        df_fuel.to_excel(writer, index=False, sheet_name='Fuel Efficiency')
-                    st.download_button(
-                        "Download Excel",
-                        output.getvalue(),
-                        f"fuel_efficiency_{fuel_start}_{fuel_end}.xlsx",
-                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    perf_df = pd.DataFrame(perf_data)
+                    st.dataframe(
+                        perf_df.assign(
+                            **{
+                                "Total Income": perf_df["Total Income"].map(_fmt_money),
+                                "Total Expenses": perf_df["Total Expenses"].map(_fmt_money),
+                                "Total Loans": perf_df["Total Loans"].map(_fmt_money),
+                                "Profit": perf_df["Profit"].map(_fmt_money),
+                                "Profit Margin %": perf_df["Profit Margin %"].map(lambda x: f"{x:,.2f}%"),
+                            }
+                        ),
+                        use_container_width=True,
                     )
 
-            # Visualization
-            st.markdown("#### Fuel Efficiency Visualization")
-        
-            viz_option = st.selectbox(
-                "Select Chart",
-                ["MPG by Truck", "Cost per Mile by Truck", "Fuel Cost Distribution", "Miles Breakdown"],
-                key="fuel_viz_option"
-            )
-        
-            if viz_option == "MPG by Truck":
-                fig = px.bar(
-                    df_fuel,
-                    x='truck_number',
-                    y='mpg',
-                    title='Miles Per Gallon by Truck',
-                    labels={'truck_number': 'Truck', 'mpg': 'MPG'},
-                    color='mpg',
-                    color_continuous_scale='RdYlGn'
-                )
-                st.plotly_chart(fig, use_container_width=True)
-        
-            elif viz_option == "Cost per Mile by Truck":
-                fig = px.bar(
-                    df_fuel,
-                    x='truck_number',
-                    y='cost_per_mile',
-                    title='Fuel Cost per Mile by Truck',
-                    labels={'truck_number': 'Truck', 'cost_per_mile': 'Cost per Mile ($)'},
-                    color='cost_per_mile',
-                    color_continuous_scale='RdYlGn_r'
-                )
-                st.plotly_chart(fig, use_container_width=True)
-        
-            elif viz_option == "Fuel Cost Distribution":
-                fig = px.pie(
-                    df_fuel,
-                    values='total_fuel_cost',
-                    names='truck_number',
-                    title='Fuel Cost Distribution by Truck'
-                )
-                st.plotly_chart(fig, use_container_width=True)
-        
-            elif viz_option == "Miles Breakdown":
-                # Prepare data for stacked bar chart
-                miles_data = []
-                for _, row in df_fuel.iterrows():
-                    miles_data.append({
-                        'Truck': row['truck_number'],
-                        'Miles': row['total_loaded_miles'],
-                        'Type': 'Loaded'
-                    })
-                    miles_data.append({
-                        'Truck': row['truck_number'],
-                        'Miles': row['total_empty_miles'],
-                        'Type': 'Empty'
-                    })
-            
-                df_miles = pd.DataFrame(miles_data)
-                fig = px.bar(
-                    df_miles,
-                    x='Truck',
-                    y='Miles',
-                    color='Type',
-                    title='Loaded vs Empty Miles by Truck',
-                    barmode='stack',
-                    color_discrete_map={'Loaded': '#2ecc71', 'Empty': '#e74c3c'}
-                )
-                st.plotly_chart(fig, use_container_width=True)
-
-    st.markdown("---")
-    st.markdown("### 💰 Total Cost Per Mile by Truck")
-    st.caption("Comprehensive cost analysis including all expense categories")
-
-    # Date range for cost per mile report
-    cpm_col1, cpm_col2 = st.columns(2)
-    with cpm_col1:
-        cpm_start = st.date_input("CPM Report Start Date", value=date.today().replace(month=1, day=1), key="cpm_start")
-    with cpm_col2:
-        cpm_end = st.date_input("CPM Report End Date", value=date.today(), key="cpm_end")
-
-    if cpm_start > cpm_end:
-        st.error("Start date must be before end date.")
-    else:
-        # 1) Ensure df_miles exists FIRST
-        conn_miles = get_db_connection()
-        try:
-            df_miles = safe_read_sql(
-                """
-                SELECT
-                    i.truck_id,
-                    COALESCE(SUM(i.loaded_miles), 0) AS total_loaded_miles,
-                    COALESCE(SUM(i.empty_miles), 0) AS total_empty_miles
-                FROM income i
-                WHERE i.date >= ? AND i.date <= ?
-                GROUP BY i.truck_id
-                """,
-                conn_miles,
-                params=(cpm_start, cpm_end)
-            )
-        finally:
-            conn_miles.close()
-        if df_miles is None or df_miles.empty:
-            df_miles = pd.DataFrame(columns=['truck_id', 'total_loaded_miles', 'total_empty_miles'])
-        # Add total_miles and coerce numerics
-        for c in ['total_loaded_miles', 'total_empty_miles']:
-            if c in df_miles.columns:
-                df_miles[c] = pd.to_numeric(df_miles[c], errors='coerce').fillna(0.0)
-            else:
-                df_miles[c] = 0.0
-        df_miles['total_miles'] = df_miles['total_loaded_miles'] + df_miles['total_empty_miles']
-
-        # 2) Build your expenses by category, then pivot -> df_pivot
-        # df_expenses_by_cat = <your query here>
-        df_pivot = df_expenses_by_cat.pivot_table(
-            index=['truck_id', 'truck_number'],
-            columns='category',
-            values='category_total',
-            fill_value=0,
-            aggfunc='sum'
-        ).reset_index()
-
-        # 3) All trucks
-        conn_cpm_all = get_db_connection()
-        try:
-            df_trucks_all = safe_read_sql(
-                "SELECT truck_id, number AS truck_number FROM trucks",
-                conn_cpm_all
-            )
-        finally:
-            conn_cpm_all.close()
-        if df_trucks_all is None:
-            df_trucks_all = pd.DataFrame(columns=["truck_id", "truck_number"])
-
-        # 4) Merge expenses into df_base (left on truck_id), keep single truck_number
-        df_base = df_trucks_all.merge(
-            df_pivot.drop(columns=[c for c in ['truck_number'] if c in df_pivot.columns]),
-            on='truck_id', how='left'
-        )
-        if 'truck_number_x' in df_base.columns and 'truck_number' not in df_base.columns:
-            df_base = df_base.rename(columns={'truck_number_x': 'truck_number'})
-        if 'truck_number_y' in df_base.columns:
-            df_base = df_base.drop(columns=['truck_number_y'])
-        df_base['truck_number'] = df_base['truck_number'].fillna('Unknown')
-
-        # 5) NOW merge miles into df_base
-        df_base = df_base.merge(
-            df_miles[['truck_id', 'total_miles', 'total_loaded_miles', 'total_empty_miles']],
-            on='truck_id', how='left'
-        )
-        for c in ['total_miles', 'total_loaded_miles', 'total_empty_miles']:
-            if c in df_base.columns:
-                df_base[c] = pd.to_numeric(df_base[c], errors='coerce').fillna(0.0)
-            else:
-                df_base[c] = 0.0
-
-        # Attach prorated loans (truck-level, includes trailer loans)
-        loans_for_cpm = (
-            loans_df[['truck_id', 'loan_amount']].copy()
-            if 'loans_df' in globals() and loans_df is not None else
-            pd.DataFrame(columns=['truck_id', 'loan_amount'])
-        )
-        if loans_for_cpm.empty:
-            loans_for_cpm = pd.DataFrame(columns=['truck_id', 'loan_amount'])
-
-        df_base = df_base.merge(loans_for_cpm, on='truck_id', how='left')
-        df_base['loan_amount'] = pd.to_numeric(df_base['loan_amount'], errors='coerce').fillna(0.0)
-
-        # Category columns present (everything but ids/labels/totals)
-        protected_cols = {
-            'truck_id', 'truck_number', 'total_miles',
-            'total_loaded_miles', 'total_empty_miles', 'loan_amount'
-        }
-        category_columns = [col for col in df_base.columns if col not in protected_cols]
-
-        # Coerce categories to numeric
-        for cat in category_columns:
-            df_base[cat] = pd.to_numeric(df_base[cat], errors='coerce').fillna(0.0)
-
-        # Total expenses = sum(categories) + loans
-        df_base['total_expenses'] = df_base[category_columns].sum(axis=1) + df_base['loan_amount']
-
-        # Raw CPM (numeric); keep NaN when miles == 0. We will display "N/A".
-        df_base['cost_per_mile_raw'] = df_base.apply(
-            lambda row: (row['total_expenses'] / row['total_miles']) if row['total_miles'] > 0 else float('nan'),
-            axis=1
-        )
-
-        # Per-category CPMs: use 0.0 when miles == 0 (you can switch to NaN if you prefer "N/A" there too)
-        for cat in category_columns:
-            df_base[f'{cat}_cpm'] = df_base.apply(
-                lambda row: round(row[cat] / row['total_miles'], 2) if row['total_miles'] > 0 else 0.0,
-                axis=1
-            )
-
-        # Display summary metrics
-        st.markdown("#### Fleet Summary")
-        metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
-
-        with metric_col1:
-            total_expenses_all = df_base['total_expenses'].sum()
-            st.metric("Total Expenses", f"${total_expenses_all:,.2f}")
-
-        with metric_col2:
-            total_miles_all = df_base['total_miles'].sum()
-            st.metric("Total Miles", f"{total_miles_all:,.0f}")
-
-        with metric_col3:
-            fleet_cpm = round(total_expenses_all / total_miles_all, 2) if total_miles_all > 0 else 0
-            st.metric("Fleet Avg Cost/Mile", f"${fleet_cpm}")
-
-        with metric_col4:
-            trucks_with_miles = df_base[df_base['total_miles'] > 0]
-            avg_truck_cpm = trucks_with_miles['cost_per_mile_raw'].mean()
-            st.metric("Avg Truck Cost/Mile", f"${(0 if pd.isna(avg_truck_cpm) else avg_truck_cpm):.2f}")
-
-        # Display detailed breakdown by truck
-        st.markdown("#### Cost Breakdown by Truck")
-
-        display_cpm = df_base.copy()
-        display_cpm['truck_number'] = display_cpm['truck_number'].fillna('Unknown')
-
-        # Money formatting for categories
-        for cat in category_columns:
-            display_cpm[cat] = display_cpm[cat].apply(lambda x: f"${x:,.2f}")
-
-        display_cpm['total_expenses'] = display_cpm['total_expenses'].apply(lambda x: f"${x:,.2f}")
-        display_cpm['total_miles'] = display_cpm['total_miles'].apply(lambda x: f"{x:,.0f}")
-
-        # Human-friendly Cost/Mile: "N/A" when no miles
-        display_cpm['cost_per_mile'] = display_cpm['cost_per_mile_raw'].apply(
-            lambda v: "N/A" if pd.isna(v) else f"${v:.2f}"
-        )
-
-        # Select columns to display
-        display_columns = ['truck_number', 'total_expenses', 'total_miles', 'cost_per_mile'] + category_columns
-        display_cpm_table = display_cpm[display_columns]
-
-        # Rename columns for better readability
-        column_rename = {
-            'truck_number': 'Truck',
-            'total_expenses': 'Total Expenses',
-            'total_miles': 'Total Miles',
-            'cost_per_mile': 'Cost/Mile'
-        }
-        display_cpm_table = display_cpm_table.rename(columns=column_rename)
-
-        st.dataframe(display_cpm_table, use_container_width=True, hide_index=True)
-
-        # Category breakdown table
-        st.markdown("#### Cost Per Mile by Category")
-
-        cpm_by_category = df_base.copy()
-        cpm_by_category['truck_number'] = cpm_by_category['truck_number'].fillna('Unknown')
-
-        cpm_columns = ['truck_number'] + [f'{cat}_cpm' for cat in category_columns]
-        cpm_by_category_table = cpm_by_category[cpm_columns]
-
-        for col in [f'{cat}_cpm' for cat in category_columns]:
-            cpm_by_category_table[col] = cpm_by_category_table[col].apply(lambda x: f"${x:.2f}")
-
-        cpm_rename = {'truck_number': 'Truck'}
-        for cat in category_columns:
-            cpm_rename[f'{cat}_cpm'] = f'{cat} $/mi'
-
-        cpm_by_category_table = cpm_by_category_table.rename(columns=cpm_rename)
-
-        st.dataframe(cpm_by_category_table, use_container_width=True, hide_index=True)
-
-        # Visualizations
-        st.markdown("#### Cost Per Mile Visualizations")
-        viz_option = st.selectbox(
-            "Select Visualization",
-            ["Total Cost/Mile by Truck", "Expense Category Distribution", "Category Cost/Mile Comparison", "Miles vs Expenses"],
-            key="cpm_viz_option"
-        )
-
-        if viz_option == "Total Cost/Mile by Truck":
-            df_chart = df_base.copy()
-            df_chart['truck_number'] = df_chart['truck_number'].fillna('Unknown')
-            # exclude trucks with 0 miles (undefined CPM)
-            df_chart = df_chart[df_chart['total_miles'] > 0]
-            fig = px.bar(
-                df_chart,
-                x='truck_number',
-                y='cost_per_mile_raw',
-                title='Total Cost Per Mile by Truck',
-                labels={'truck_number': 'Truck', 'cost_per_mile_raw': 'Cost per Mile ($)'},
-                color='cost_per_mile_raw',
-                color_continuous_scale='RdYlGn_r'
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-        elif viz_option == "Expense Category Distribution":
-            df_chart = df_base.copy()
-            df_chart['truck_number'] = df_chart['truck_number'].fillna('Unknown')
-
-            category_data = []
-            for _, row in df_chart.iterrows():
-                for cat in category_columns:
-                    category_data.append({
-                        'Truck': row['truck_number'],
-                        'Category': cat,
-                        'Amount': row[cat]
-                    })
-            df_category_stack = pd.DataFrame(category_data)
-
-            fig = px.bar(
-                df_category_stack,
-                x='Truck',
-                y='Amount',
-                color='Category',
-                title='Expense Distribution by Category and Truck',
-                labels={'Amount': 'Total Expenses ($)'},
-                barmode='stack'
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-        elif viz_option == "Category Cost/Mile Comparison":
-            df_chart = df_base.copy()
-            df_chart['truck_number'] = df_chart['truck_number'].fillna('Unknown')
-            # Only meaningful where miles > 0
-            df_chart = df_chart[df_chart['total_miles'] > 0]
-
-            cpm_data = []
-            for _, row in df_chart.iterrows():
-                for cat in category_columns:
-                    cpm_data.append({
-                        'Truck': row['truck_number'],
-                        'Category': cat,
-                        'Cost_per_Mile': row[f'{cat}_cpm']
-                    })
-            df_cpm_grouped = pd.DataFrame(cpm_data)
-
-            fig = px.bar(
-                df_cpm_grouped,
-                x='Truck',
-                y='Cost_per_Mile',
-                color='Category',
-                title='Cost Per Mile by Category and Truck',
-                labels={'Cost_per_Mile': 'Cost per Mile ($)'},
-                barmode='group'
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-        elif viz_option == "Miles vs Expenses":
-            df_chart = df_base.copy()
-            df_chart['truck_number'] = df_chart['truck_number'].fillna('Unknown')
-
-            fig = px.scatter(
-                df_chart,
-                x='total_miles',
-                y='total_expenses',
-                size=df_chart['cost_per_mile_raw'].fillna(0),  # bubble=0 for trucks with N/A CPM
-                color='truck_number',
-                title='Total Miles vs Total Expenses by Truck',
-                labels={
-                    'total_miles': 'Total Miles',
-                    'total_expenses': 'Total Expenses ($)',
-                    'truck_number': 'Truck'
-                },
-                hover_data=['truck_number']
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-        # Export functionality (export raw numbers including loans and zero miles)
-        st.markdown("#### Export Cost Per Mile Report")
-        export_col1, export_col2 = st.columns(2)
-
-        with export_col1:
-            if st.button("📥 Export to CSV", key="export_cpm_csv"):
-                export_df = df_base.copy()
-                csv = export_df.to_csv(index=False)
-                st.download_button(
-                    "Download CSV",
-                    csv,
-                    f"cost_per_mile_{cpm_start}_{cpm_end}.csv",
-                    "text/csv"
-                )
-
-        with export_col2:
-            if st.button("📥 Export to Excel", key="export_cpm_excel"):
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    df_base.to_excel(writer, index=False, sheet_name='Cost Per Mile Summary')
-                    df_expenses_by_cat.to_excel(writer, index=False, sheet_name='Expenses by Category')
-                    df_miles.to_excel(writer, index=False, sheet_name='Miles Data')
-                st.download_button(
-                    "Download Excel",
-                    output.getvalue(),
-                    f"cost_per_mile_{cpm_start}_{cpm_end}.xlsx",
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+    conn.close()
 
 st.markdown("----\nFleet Management System © 2025")
