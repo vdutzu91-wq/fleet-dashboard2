@@ -7553,29 +7553,31 @@ elif page == "Reports":
     # -------------------------------------------
     loans_df = pd.DataFrame(columns=["truck_id", "truck_number", "dispatcher_id", "dispatcher_name", "total_loans"])
     
-    if has_loans_hist:
+    if has_loans_hist and has_trucks:
         try:
-            # Get all loan records in date range.
-            # We *don't* assume loans_history has truck_id; only dispatcher-based loans.
+            # Get all loan records in date range
             q_loans = text("""
                 SELECT 
+                    lh.truck_id,
+                    tr.number AS truck_number,
                     lh.dispatcher_id,
                     d.name AS dispatcher_name,
                     lh.amount,
                     lh.date,
                     lh.type
                 FROM loans_history lh
+                LEFT JOIN trucks tr ON tr.truck_id = lh.truck_id
                 LEFT JOIN dispatchers d ON d.dispatcher_id = lh.dispatcher_id
                 WHERE lh.date BETWEEN :start_date AND :end_date
-                ORDER BY lh.date
+                ORDER BY lh.truck_id, lh.date
             """)
             loans_raw = safe_read_sql(q_loans, conn, {"start_date": start_date, "end_date": end_date})
             
             if not loans_raw.empty:
-                # Calculate net loans per dispatcher (no truck dimension)
+                # Calculate net loans per truck/dispatcher
                 loans_agg = []
-                for (did, dname), grp in loans_raw.groupby(
-                    ["dispatcher_id", "dispatcher_name"], dropna=False
+                for (tid, tnum, did, dname), grp in loans_raw.groupby(
+                    ["truck_id", "truck_number", "dispatcher_id", "dispatcher_name"], dropna=False
                 ):
                     net = 0.0
                     for _, row in grp.iterrows():
@@ -7585,16 +7587,20 @@ elif page == "Reports":
                         elif row["type"] == "returned":
                             net -= amt
                     loans_agg.append({
+                        "truck_id": tid,
+                        "truck_number": tnum,
                         "dispatcher_id": did,
                         "dispatcher_name": dname,
                         "total_loans": net
                     })
                 loans_df = pd.DataFrame(loans_agg)
             else:
-                loans_df = pd.DataFrame(columns=["dispatcher_id", "dispatcher_name", "total_loans"])
+                loans_df = pd.DataFrame(columns=["truck_id", "truck_number", "dispatcher_id", "dispatcher_name", "total_loans"])
         except Exception as e:
             st.warning(f"Loans calculation failed: {e}")
-            loans_df = pd.DataFrame(columns=["dispatcher_id", "dispatcher_name", "total_loans"])
+            loans_df = pd.DataFrame(columns=["truck_id", "truck_number", "dispatcher_id", "dispatcher_name", "total_loans"])
+    else:
+        loans_df = pd.DataFrame(columns=["truck_id", "truck_number", "dispatcher_id", "dispatcher_name", "total_loans"])
         except Exception as e:
             st.warning(f"Loans calculation failed: {e}")
 
