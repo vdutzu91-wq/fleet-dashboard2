@@ -7562,59 +7562,78 @@ elif page == "Reports":
     else:
         expense_df = pd.DataFrame(columns=["truck_id", "truck_number", "dispatcher_id", "dispatcher_name", "total_expenses"])
 
-    # -------------------------------------------
-    # Loans calculation (dispatcher-aware)
-    # -------------------------------------------
+    # ----
+    # Loans calculation (using historical monthly loans per truck/trailer)
+    # ----
+    from datetime import date as _date_type  # just to be explicit
+
     loans_df = pd.DataFrame(columns=["truck_id", "truck_number", "dispatcher_id", "dispatcher_name", "total_loans"])
-    
-    if has_loans_hist and has_trucks:
+
+    if has_trucks:
         try:
-            # Get all loan records in date range
-            q_loans = text("""
-                SELECT 
-                    lh.truck_id,
-                    tr.number AS truck_number,
-                    lh.dispatcher_id,
-                    d.name AS dispatcher_name,
-                    lh.amount,
-                    lh.date,
-                    lh.type
-                FROM loans_history lh
-                LEFT JOIN trucks tr ON tr.truck_id = lh.truck_id
-                LEFT JOIN dispatchers d ON d.dispatcher_id = lh.dispatcher_id
-                WHERE lh.date BETWEEN :start_date AND :end_date
-                ORDER BY lh.truck_id, lh.date
-            """)
-            loans_raw = safe_read_sql(q_loans, conn, {"start_date": start_date, "end_date": end_date})
-            
-            if not loans_raw.empty:
-                # Calculate net loans per truck/dispatcher
-                loans_agg = []
-                for (tid, tnum, did, dname), grp in loans_raw.groupby(
-                    ["truck_id", "truck_number", "dispatcher_id", "dispatcher_name"], dropna=False
-                ):
-                    net = 0.0
-                    for _, row in grp.iterrows():
-                        amt = float(row["amount"]) if row["amount"] else 0.0
-                        if row["type"] == "given":
-                            net += amt
-                        elif row["type"] == "returned":
-                            net -= amt
-                    loans_agg.append({
-                        "truck_id": tid,
-                        "truck_number": tnum,
-                        "dispatcher_id": did,
-                        "dispatcher_name": dname,
-                        "total_loans": net
+            # Use existing helper: total_loan per truck (truck + its trailers)
+            # It returns a dict keyed by truck_number
+            loans_map = get_truck_loans_in_range(start_date, end_date)
+            if loans_map:
+                tmp_rows = []
+                for truck_number, info in loans_map.items():
+                    tmp_rows.append({
+                        "truck_id": info["truck_id"],
+                        "truck_number": truck_number,
+                        "total_loan_for_truck": float(info.get("total_loan", 0.0)),
                     })
-                loans_df = pd.DataFrame(loans_agg)
+                loans_per_truck = pd.DataFrame(tmp_rows)
             else:
+                loans_per_truck = pd.DataFrame(columns=["truck_id", "truck_number", "total_loan_for_truck"])
+
+            if loans_per_truck.empty:
                 loans_df = pd.DataFrame(columns=["truck_id", "truck_number", "dispatcher_id", "dispatcher_name", "total_loans"])
+            else:
+                # We already computed income_df earlier: income by truck + dispatcher
+                # To apportion loan cost per dispatcher, we:
+                # 1) Compute total income per truck
+                # 2) For each truck/dispatcher row, allocate loan in proportion to its share of truck income.
+                if not income_df.empty:
+                    inc = income_df.copy()
+                    # Fallback dispatcher name
+                    inc["dispatcher_name"] = inc["dispatcher_name"].fillna("Unassigned")
+
+                    # Total income per truck
+                    truck_income = inc.groupby("truck_id", dropna=False)["total_income"].sum().rename("truck_income_total").reset_index()
+                    inc = inc.merge(truck_income, on="truck_id", how="left")
+
+                    # Merge loans per truck
+                    inc = inc.merge(loans_per_truck, on=["truck_id", "truck_number"], how="left")
+
+                    # Compute each row's share of truck loan
+                    def _alloc(row):
+                        loan = float(row.get("total_loan_for_truck") or 0.0)
+                        truck_inc = float(row.get("truck_income_total") or 0.0)
+                        if loan == 0.0 or truck_inc <= 0.0:
+                            return 0.0
+                        share = float(row.get("total_income") or 0.0) / truck_inc
+                        return loan * share
+
+                    inc["total_loans"] = inc.apply(_alloc, axis=1)
+
+                    loans_df = inc[[
+                        "truck_id",
+                        "truck_number",
+                        "dispatcher_id",
+                        "dispatcher_name",
+                        "total_loans",
+                    ]].copy()
+                else:
+                    # No income data – in that case just attach loan to truck with no dispatcher breakdown
+                    loans_df = loans_per_truck.rename(
+                        columns={"total_loan_for_truck": "total_loans"}
+                    )
+                    loans_df["dispatcher_id"] = None
+                    loans_df["dispatcher_name"] = None
+
         except Exception as e:
-            st.warning(f"Loans calculation failed: {e}")
+            st.warning(f"Loans calculation failed (prorated): {e}")
             loans_df = pd.DataFrame(columns=["truck_id", "truck_number", "dispatcher_id", "dispatcher_name", "total_loans"])
-    else:
-        loans_df = pd.DataFrame(columns=["truck_id", "truck_number", "dispatcher_id", "dispatcher_name", "total_loans"])
         
     # -------------------------------------------
     # Merge income, expenses, loans by truck + dispatcher
