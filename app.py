@@ -7615,9 +7615,7 @@ elif page == "Reports":
             loans_df = pd.DataFrame(columns=["truck_id", "truck_number", "dispatcher_id", "dispatcher_name", "total_loans"])
     else:
         loans_df = pd.DataFrame(columns=["truck_id", "truck_number", "dispatcher_id", "dispatcher_name", "total_loans"])
-        except Exception as e:
-            st.warning(f"Loans calculation failed: {e}")
-
+        
     # -------------------------------------------
     # Merge income, expenses, loans by truck + dispatcher
     # -------------------------------------------
