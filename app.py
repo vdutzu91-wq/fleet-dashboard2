@@ -7283,6 +7283,20 @@ elif page == "👥 User Management":
 
 elif page == "Reports":
     st.header("📊 Reports")
+    
+    # ONE-TIME MIGRATION: Add truck_id to loans_history
+    if st.button("🔧 Migrate loans_history table (click once)", key="migrate_loans"):
+        try:
+            raw_conn = get_raw_db_connection()
+            raw_conn.execute(text("""
+                ALTER TABLE loans_history
+                ADD COLUMN IF NOT EXISTS truck_id INTEGER REFERENCES trucks(truck_id)
+            """))
+            raw_conn.commit()
+            raw_conn.close()
+            st.success("✅ Migration complete! truck_id column added to loans_history.")
+        except Exception as e:
+            st.error(f"Migration failed: {e}")
 
     # -----------------------------
     # Date Preset Toolbar
@@ -7625,18 +7639,7 @@ elif page == "Reports":
         columns=["truck_id", "truck_number", "dispatcher_id", "dispatcher_name", "total_income"]
     )
     combined = merge_on_truck_dispatcher(combined, expense_df, how="outer")
-
-    # Merge loans by dispatcher only (loans_df has no truck dimension)
-    if not loans_df.empty:
-        combined = pd.merge(
-            combined,
-            loans_df,
-            on=["dispatcher_id", "dispatcher_name"],
-            how="left",
-        )
-    else:
-        if "total_loans" not in combined.columns:
-            combined["total_loans"] = 0.0
+    combined = merge_on_truck_dispatcher(combined, loans_df, how="outer")
 
     # Fill NaN
     for col in ["total_income", "total_expenses", "total_loans"]:
