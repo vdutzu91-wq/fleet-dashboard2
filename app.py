@@ -1412,13 +1412,12 @@ def init_history_tables():
 
     cur.execute('''
     CREATE TABLE IF NOT EXISTS loans_history (
-        id SERIAL PRIMARY KEY,
-        entity_type TEXT NOT NULL,
-        entity_id INTEGER NOT NULL,
-        monthly_amount REAL NOT NULL,
-        start_date DATE NOT NULL,
-        end_date DATE,
-        note TEXT,
+        loan_id SERIAL PRIMARY KEY,
+        truck_id INTEGER REFERENCES trucks(truck_id),
+        dispatcher_id INTEGER REFERENCES dispatchers(dispatcher_id),
+        amount NUMERIC(10, 2) NOT NULL,
+        type TEXT NOT NULL CHECK (type IN ('given', 'returned')),
+        date DATE NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     ''')
@@ -7554,31 +7553,29 @@ elif page == "Reports":
     # -------------------------------------------
     loans_df = pd.DataFrame(columns=["truck_id", "truck_number", "dispatcher_id", "dispatcher_name", "total_loans"])
     
-    if has_loans_hist and has_trucks:
+    if has_loans_hist:
         try:
-            # Get all loan records in date range
+            # Get all loan records in date range.
+            # We *don't* assume loans_history has truck_id; only dispatcher-based loans.
             q_loans = text("""
                 SELECT 
-                    lh.truck_id,
-                    tr.number AS truck_number,
                     lh.dispatcher_id,
                     d.name AS dispatcher_name,
                     lh.amount,
                     lh.date,
                     lh.type
                 FROM loans_history lh
-                LEFT JOIN trucks tr ON tr.truck_id = lh.truck_id
                 LEFT JOIN dispatchers d ON d.dispatcher_id = lh.dispatcher_id
                 WHERE lh.date BETWEEN :start_date AND :end_date
-                ORDER BY lh.truck_id, lh.date
+                ORDER BY lh.date
             """)
             loans_raw = safe_read_sql(q_loans, conn, {"start_date": start_date, "end_date": end_date})
             
             if not loans_raw.empty:
-                # Calculate net loans per truck/dispatcher
+                # Calculate net loans per dispatcher (no truck dimension)
                 loans_agg = []
-                for (tid, tnum, did, dname), grp in loans_raw.groupby(
-                    ["truck_id", "truck_number", "dispatcher_id", "dispatcher_name"], dropna=False
+                for (did, dname), grp in loans_raw.groupby(
+                    ["dispatcher_id", "dispatcher_name"], dropna=False
                 ):
                     net = 0.0
                     for _, row in grp.iterrows():
@@ -7588,13 +7585,16 @@ elif page == "Reports":
                         elif row["type"] == "returned":
                             net -= amt
                     loans_agg.append({
-                        "truck_id": tid,
-                        "truck_number": tnum,
                         "dispatcher_id": did,
                         "dispatcher_name": dname,
                         "total_loans": net
                     })
                 loans_df = pd.DataFrame(loans_agg)
+            else:
+                loans_df = pd.DataFrame(columns=["dispatcher_id", "dispatcher_name", "total_loans"])
+        except Exception as e:
+            st.warning(f"Loans calculation failed: {e}")
+            loans_df = pd.DataFrame(columns=["dispatcher_id", "dispatcher_name", "total_loans"])
         except Exception as e:
             st.warning(f"Loans calculation failed: {e}")
 
@@ -7619,7 +7619,18 @@ elif page == "Reports":
         columns=["truck_id", "truck_number", "dispatcher_id", "dispatcher_name", "total_income"]
     )
     combined = merge_on_truck_dispatcher(combined, expense_df, how="outer")
-    combined = merge_on_truck_dispatcher(combined, loans_df, how="outer")
+
+    # Merge loans by dispatcher only (loans_df has no truck dimension)
+    if not loans_df.empty:
+        combined = pd.merge(
+            combined,
+            loans_df,
+            on=["dispatcher_id", "dispatcher_name"],
+            how="left",
+        )
+    else:
+        if "total_loans" not in combined.columns:
+            combined["total_loans"] = 0.0
 
     # Fill NaN
     for col in ["total_income", "total_expenses", "total_loans"]:
