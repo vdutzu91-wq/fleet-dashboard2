@@ -7687,7 +7687,7 @@ elif page == "Reports":
                     total_expenses=df_group["total_expenses"].map(_fmt_money),
                     total_loans=df_group["total_loans"].map(_fmt_money),
                     profit=df_group["profit"].map(_fmt_money),
-                    profit_margin_%=df_group["profit_margin_%"].map(lambda x: f"{x:,.2f}%"),
+                    **{"profit_margin_%": df_group["profit_margin_%"].map(lambda x: f"{x:,.2f}%")}
                 ),
                 use_container_width=True,
             )
